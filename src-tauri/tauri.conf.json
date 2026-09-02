@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "quickeye",
+  "version": "0.7.0",
+  "identifier": "com.su27.quickeye",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "quickeye",
+        "width": 860,
+        "height": 600,
+        "minWidth": 320,
+        "minHeight": 220,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "dragDropEnabled": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "fileAssociations": [
+      {
+        "ext": ["docx"],
+        "name": "DOCX 文档",
+        "description": "DOCX 文档",
+        "role": "Viewer",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      },
+      {
+        "ext": ["xlsx"],
+        "name": "XLSX 工作簿",
+        "description": "XLSX 工作簿",
+        "role": "Viewer",
+        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      },
+      {
+        "ext": ["pptx"],
+        "name": "PPTX 演示文稿",
+        "description": "PPTX 演示文稿",
+        "role": "Viewer",
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      },
+      {
+        "ext": ["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"],
+        "name": "图片",
+        "description": "图片",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css", "csv", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "swift", "toml", "ts", "tsv", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh"],
+        "name": "文本和代码",
+        "description": "文本和代码文件",
+        "role": "Viewer"
+      }
+    ],
+    "shortDescription": "极简、离线的文件查看器",
+    "longDescription": "quickeye 是一个仅在本机解析 Office 文档、图片、文本和代码的只读查看器。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

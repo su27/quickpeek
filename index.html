@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#f4f6f8" />
+    <title>quickeye</title>
+  </head>
+  <body>
+    <div id="app">
+      <div class="tool-strip">
+        <div class="search-control" id="searchControl">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="8.5" cy="8.5" r="4.8" />
+            <path d="m12 12 4 4" />
+          </svg>
+          <input id="searchInput" type="search" placeholder="在文档中查找" aria-label="在文档中查找" autocomplete="off" disabled />
+          <span id="searchCount" class="search-count" aria-live="polite"></span>
+          <button id="previousMatch" class="inline-icon" type="button" title="上一个（Shift+Enter）" aria-label="上一个匹配项" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 12.5 4.5-5 4.5 5" /></svg>
+          </button>
+          <button id="nextMatch" class="inline-icon" type="button" title="下一个（Enter）" aria-label="下一个匹配项" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 7.5 4.5 5 4.5-5" /></svg>
+          </button>
+        </div>
+
+      </div>
+
+      <main id="workspace" class="workspace is-empty">
+        <div id="dropOverlay" class="drop-overlay" aria-hidden="true">
+          <div class="drop-card">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M8 4h10l6 6v18H8z" />
+              <path d="M18 4v6h6M16 22V13M12.5 16.5 16 13l3.5 3.5" />
+            </svg>
+            <strong>松开即可打开</strong>
+            <span>支持文档、图片、文本和代码</span>
+          </div>
+        </div>
+
+        <section id="emptyState" class="empty-state">
+          <div class="empty-illustration" aria-hidden="true">
+            <div class="paper paper-back"></div>
+            <div class="paper paper-front">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div class="word-badge">W</div>
+          </div>
+          <h1>打开一个文件</h1>
+          <p>支持 Office 文档、常见图片、文本和代码，文件只在本机解析。</p>
+          <button id="emptyOpenButton" class="button button-primary button-large" type="button">选择文件</button>
+          <span class="shortcut-hint"><kbd>Ctrl</kbd><span>+</span><kbd>O</kbd> 快速打开</span>
+        </section>
+
+        <section id="loadingState" class="loading-state" aria-live="polite" aria-hidden="true">
+          <span class="spinner" aria-hidden="true"></span>
+          <strong>正在打开文件…</strong>
+          <span>复杂文档或大文件可能需要几秒钟</span>
+        </section>
+
+        <div id="documentViewport" class="document-viewport" aria-label="文件预览">
+          <article id="documentHost" class="document-host"></article>
+        </div>
+
+        <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      </main>
+
+      <input id="fileInput" type="file" accept=".docx,.xlsx,.pptx,.avif,.bmp,.gif,.jpeg,.jpg,.png,.svg,.webp,.txt,.log,.md,.markdown,.json,.jsonc,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.csv,.tsv,.js,.jsx,.mjs,.cjs,.ts,.tsx,.css,.scss,.less,.html,.htm,.c,.h,.cc,.cpp,.hpp,.cs,.java,.kt,.kts,.swift,.go,.rs,.py,.pyw,.rb,.php,.sh,.bash,.zsh,.ps1,.bat,.cmd,.sql,.vue,.svelte,.dart,.lua,.r,.scala,.pl,.ex,.exs,.erl,.hrl,.clj,.cljs,.env" hidden />
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

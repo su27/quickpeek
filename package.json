@@ -1,0 +1,25 @@
+{
+  "name": "quickeye",
+  "private": true,
+  "version": "0.7.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "check": "tsc --noEmit",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@aiden0z/pptx-renderer": "1.2.4",
+    "@js-preview/excel": "1.7.14",
+    "@tauri-apps/api": "^2.8.0",
+    "docx-preview": "0.4.0",
+    "highlight.js": "^11.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

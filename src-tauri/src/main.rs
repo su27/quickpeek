@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    quickeye_lib::run();
+    quickpeek_lib::run();
 }

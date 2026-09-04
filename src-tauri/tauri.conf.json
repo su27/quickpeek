@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "quickeye",
-  "version": "0.9.0",
-  "identifier": "com.su27.quickeye",
+  "productName": "QuickPeek",
+  "version": "0.10.0",
+  "identifier": "com.su27.quickpeek",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "quickeye",
+        "title": "QuickPeek",
         "width": 860,
         "height": 600,
         "minWidth": 320,
@@ -99,7 +99,7 @@
       }
     ],
     "shortDescription": "极简、离线的文件查看器",
-    "longDescription": "quickeye 是一个仅在本机解析文档、表格、演示文稿、PDF、图片、音视频、压缩包目录、文本和代码的只读查看器。",
+    "longDescription": "QuickPeek 是一个仅在本机解析文档、表格、演示文稿、PDF、图片、音视频、压缩包目录、文本和代码的只读查看器。",
     "windows": {
       "nsis": {
         "installMode": "currentUser"

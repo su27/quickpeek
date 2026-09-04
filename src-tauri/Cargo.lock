@@ -2649,8 +2649,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "quickeye"
-version = "0.9.0"
+name = "quickpeek"
+version = "0.10.0"
 dependencies = [
  "serde",
  "tauri",

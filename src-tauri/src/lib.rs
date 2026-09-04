@@ -36,35 +36,36 @@ const TEXT_EXTENSIONS: &[&str] = &[
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewRequest {
+    is_directory: bool,
     modified_at: Option<u64>,
     path: String,
     size: u64,
 }
 
 fn diagnostic_log(message: &str) {
-    eprintln!("[quickeye] {message}");
-    if std::env::var_os("QUICKEYE_DIAGNOSTICS").is_none() {
+    eprintln!("[QuickPeek] {message}");
+    if std::env::var_os("QUICKPEEK_DIAGNOSTICS").is_none() {
         return;
     }
 
-    let log_path = std::env::temp_dir().join("quickeye-error.log");
+    let log_path = std::env::temp_dir().join("quickpeek-error.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{message}\n");
     }
 }
 
-fn find_document_argument<I>(arguments: I) -> Option<PathBuf>
+fn find_preview_argument<I>(arguments: I) -> Option<PathBuf>
 where
     I: IntoIterator<Item = OsString>,
 {
     arguments
         .into_iter()
         .map(PathBuf::from)
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() || path.is_dir())
 }
 
-fn initial_document_path() -> Option<PathBuf> {
-    find_document_argument(std::env::args_os().skip(1))
+fn initial_preview_path() -> Option<PathBuf> {
+    find_preview_argument(std::env::args_os().skip(1))
 }
 
 fn is_supported_path(path: &Path) -> bool {
@@ -118,15 +119,20 @@ fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
     Some(PreviewRequest {
+        is_directory: metadata.is_dir(),
         modified_at,
         path: path.to_string_lossy().into_owned(),
-        size: metadata.len(),
+        size: if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        },
     })
 }
 
 #[tauri::command]
 fn get_initial_preview() -> Option<PreviewRequest> {
-    initial_document_path().and_then(preview_request)
+    initial_preview_path().and_then(preview_request)
 }
 
 #[tauri::command]
@@ -170,7 +176,8 @@ fn allow_preview_asset(path: String, app: AppHandle) -> Result<(), String> {
 
 pub(crate) fn hide_preview(app: &AppHandle) {
     #[cfg(target_os = "windows")]
-    windows_preview::clear_topmost(app);
+    windows_preview::hide_window(app);
+    #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -180,7 +187,7 @@ pub(crate) fn hide_preview(app: &AppHandle) {
 }
 
 pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
-    if !path.is_file() {
+    if !path.is_file() && !path.is_dir() {
         return;
     }
 
@@ -215,24 +222,16 @@ fn log_frontend_error(message: String) {
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let open_item = MenuItem::with_id(app, "open", "打开文件…", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "退出 quickeye", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出 QuickPeek", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit_item])?;
     let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("quickeye · 在资源管理器中按空格预览")
+        .tooltip("QuickPeek · 在资源管理器中按空格预览")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => {
-                #[cfg(target_os = "windows")]
-                windows_preview::prepare_for_use(app);
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "quit" {
+                app.exit(0);
             }
-            "quit" => app.exit(0),
-            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -246,14 +245,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             diagnostic_log(&format!("single-instance args: {args:?}"));
-            let path = find_document_argument(args.into_iter().skip(1).map(OsString::from));
+            let path = find_preview_argument(args.into_iter().skip(1).map(OsString::from));
             if let Some(path) = path {
                 open_preview_path(app, path);
-            } else if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
-                windows_preview::prepare_for_use(app);
-                let _ = window.show();
-                let _ = window.set_focus();
+            } else {
+                diagnostic_log("ignored duplicate launch without a file argument");
             }
         }))
         .setup(|app| {
@@ -277,12 +273,12 @@ pub fn run() {
             log_frontend_error
         ])
         .run(tauri::generate_context!())
-        .expect("error while running quickeye");
+        .expect("error while running QuickPeek");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{find_document_argument, is_supported_path};
+    use super::{find_preview_argument, is_supported_path};
     use std::{ffi::OsString, fs::File};
 
     #[test]
@@ -306,12 +302,20 @@ mod tests {
     #[test]
     fn routes_any_existing_file_to_preview() {
         let path =
-            std::env::temp_dir().join(format!("quickeye-unsupported-{}.rar", std::process::id()));
+            std::env::temp_dir().join(format!("quickpeek-unsupported-{}.rar", std::process::id()));
         File::create(&path).expect("create preview fixture");
         let result =
-            find_document_argument([OsString::from("--ignored"), path.as_os_str().to_owned()]);
+            find_preview_argument([OsString::from("--ignored"), path.as_os_str().to_owned()]);
         assert_eq!(result, Some(path.clone()));
         std::fs::remove_file(path).expect("remove preview fixture");
+    }
+
+    #[test]
+    fn routes_existing_directory_to_preview() {
+        let path = std::env::temp_dir();
+        let result =
+            find_preview_argument([OsString::from("--ignored"), path.as_os_str().to_owned()]);
+        assert_eq!(result, Some(path));
     }
 
     #[test]

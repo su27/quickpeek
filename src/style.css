@@ -415,7 +415,8 @@ kbd {
   background: #343434;
 }
 
-.document-viewport.is-file {
+.document-viewport.is-file,
+.document-viewport.is-folder {
   overflow: hidden;
   scrollbar-gutter: auto;
   background: #f1f3f6;
@@ -558,6 +559,33 @@ kbd {
   letter-spacing: 0.04em;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-info-icon.is-folder {
+  width: 116px;
+  height: 82px;
+  margin-top: 24px;
+  border-radius: 7px 10px 10px 10px;
+  border-color: #c69b32;
+  background: linear-gradient(160deg, #ffd86a, #eaae24);
+  box-shadow: 0 14px 30px rgba(94, 68, 10, 0.2);
+}
+
+.file-info-icon.is-folder::before {
+  top: -18px;
+  right: auto;
+  left: -1px;
+  width: 49px;
+  height: 22px;
+  border: 1px solid #c69b32;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: #f4c64e;
+}
+
+.file-info-icon.is-folder span {
+  color: #6d5012;
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .file-info-viewer h1 {

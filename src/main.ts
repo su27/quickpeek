@@ -37,6 +37,7 @@ const nextMatch = $<HTMLButtonElement>("#nextMatch");
 
 type ActiveDocument = {
   format: DocumentFormat;
+  isDirectory: boolean;
   name: string;
   pageElements: HTMLElement[];
   rendered: RenderedDocument;
@@ -44,6 +45,7 @@ type ActiveDocument = {
 };
 
 type NativePreviewRequest = {
+  isDirectory: boolean;
   modifiedAt?: number;
   path: string;
   size: number;
@@ -95,8 +97,8 @@ function compactPageLabel(label: string): string {
 
 function updateWindowTitle(): void {
   const title = activeDocument
-    ? `${activeDocument.name} - ${formatBytes(activeDocument.size)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
-    : "quickeye";
+    ? `${activeDocument.name} - ${activeDocument.isDirectory ? "文件夹" : formatBytes(activeDocument.size)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
+    : "QuickPeek";
   if (title === lastWindowTitle) return;
 
   lastWindowTitle = title;
@@ -458,6 +460,7 @@ function commitStagedDocument(
 
   activeDocument = {
     format,
+    isDirectory: source.isDirectory === true,
     name: source.name,
     pageElements: format.kind === "docx"
       ? Array.from(host.querySelectorAll<HTMLElement>("section.docx"))
@@ -605,9 +608,9 @@ async function loadDocumentFromPath(
   preview: NativePreviewRequest,
   request: number,
 ): Promise<void> {
-  const { modifiedAt, path, size: sourceSize } = preview;
+  const { isDirectory, modifiedAt, path, size: sourceSize } = preview;
   const name = fileNameFromPath(path);
-  const format = findDocumentFormat(name);
+  const format = findDocumentFormat(name, isDirectory);
 
   const loaded = await loadPreview(
     format,
@@ -616,6 +619,7 @@ async function loadDocumentFromPath(
       if (format.loadMode === "metadata") {
         return {
           type: "metadata" as const,
+          isDirectory,
           mimeType: "application/octet-stream",
           modifiedAt,
           name,
@@ -627,6 +631,7 @@ async function loadDocumentFromPath(
         await invoke("allow_preview_asset", { path });
         return {
           type: "url" as const,
+          isDirectory,
           url: convertFileSrc(path),
           mimeType: mimeTypeFor(name, format),
           modifiedAt,
@@ -639,6 +644,7 @@ async function loadDocumentFromPath(
       return {
         type: "buffer" as const,
         bytes: normalizeIpcBytes(payload),
+        isDirectory,
         mimeType: mimeTypeFor(name, format),
         modifiedAt,
         name,

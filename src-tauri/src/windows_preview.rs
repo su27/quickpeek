@@ -33,18 +33,18 @@ use windows::{
             WindowsAndMessaging::{
                 CallNextHookEx, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
                 GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos,
-                SetWindowsHookExW, UnhookWindowsHookEx, GUITHREADINFO, HC_ACTION, HWND_NOTOPMOST,
-                HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOSIZE, SWP_SHOWWINDOW, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+                SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, GUITHREADINFO, HC_ACTION,
+                HWND_NOTOPMOST, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WH_KEYBOARD_LL, WM_APP,
+                WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
             },
         },
     },
 };
 
-const WM_QUICKEYE_OPEN: u32 = WM_APP + 0x51;
-const WM_QUICKEYE_REFRESH: u32 = WM_APP + 0x52;
-const WM_QUICKEYE_HIDE: u32 = WM_APP + 0x53;
+const WM_QUICKPEEK_OPEN: u32 = WM_APP + 0x51;
+const WM_QUICKPEEK_REFRESH: u32 = WM_APP + 0x52;
+const WM_QUICKPEEK_HIDE: u32 = WM_APP + 0x53;
 const REFRESH_TIMER_ID: usize = 0x5145;
 const LOW_MEMORY_DELAY: Duration = Duration::from_secs(30);
 
@@ -181,7 +181,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
                 if thread_id != 0 {
                     let _ = unsafe {
-                        PostThreadMessageW(thread_id, WM_QUICKEYE_REFRESH, WPARAM(0), LPARAM(0))
+                        PostThreadMessageW(thread_id, WM_QUICKPEEK_REFRESH, WPARAM(0), LPARAM(0))
                     };
                 }
             }
@@ -205,7 +205,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
                     if thread_id != 0 {
                         let _ = unsafe {
-                            PostThreadMessageW(thread_id, WM_QUICKEYE_HIDE, WPARAM(0), LPARAM(0))
+                            PostThreadMessageW(thread_id, WM_QUICKPEEK_HIDE, WPARAM(0), LPARAM(0))
                         };
                     }
                     return LRESULT(1);
@@ -232,7 +232,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
                     if thread_id != 0 {
                         let _ = unsafe {
-                            PostThreadMessageW(thread_id, WM_QUICKEYE_OPEN, WPARAM(0), LPARAM(0))
+                            PostThreadMessageW(thread_id, WM_QUICKPEEK_OPEN, WPARAM(0), LPARAM(0))
                         };
                     }
                     return LRESULT(1);
@@ -243,7 +243,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
                     if thread_id != 0 {
                         let _ = unsafe {
-                            PostThreadMessageW(thread_id, WM_QUICKEYE_HIDE, WPARAM(0), LPARAM(0))
+                            PostThreadMessageW(thread_id, WM_QUICKPEEK_HIDE, WPARAM(0), LPARAM(0))
                         };
                     }
                     return LRESULT(1);
@@ -294,7 +294,7 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
     let mut refresh_timer_id: Option<usize> = None;
 
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
-        if message.message == WM_QUICKEYE_OPEN {
+        if message.message == WM_QUICKPEEK_OPEN {
             let is_visible = app
                 .get_webview_window("main")
                 .and_then(|window| window.is_visible().ok())
@@ -306,17 +306,17 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
                 let foreground = unsafe { GetForegroundWindow() };
                 if explorer_file_view_is_foreground(foreground) {
                     if let Ok(Some(path)) = selected_file(foreground) {
-                        if path.is_file() {
+                        if path.is_file() || path.is_dir() {
                             crate::open_preview_path(&app, path.clone());
                             last_previewed_path = Some(path);
                         }
                     }
                 }
             }
-        } else if message.message == WM_QUICKEYE_HIDE {
+        } else if message.message == WM_QUICKPEEK_HIDE {
             crate::hide_preview(&app);
             last_previewed_path = None;
-        } else if message.message == WM_QUICKEYE_REFRESH {
+        } else if message.message == WM_QUICKPEEK_REFRESH {
             if refresh_timer_id.is_none() {
                 let timer_id = unsafe { SetTimer(None, REFRESH_TIMER_ID, 35, None) };
                 if timer_id != 0 {
@@ -336,7 +336,9 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
             let foreground = unsafe { GetForegroundWindow() };
             if is_visible && explorer_file_view_is_foreground(foreground) {
                 if let Ok(Some(path)) = selected_file(foreground) {
-                    if path.is_file() && last_previewed_path.as_ref() != Some(&path) {
+                    if (path.is_file() || path.is_dir())
+                        && last_previewed_path.as_ref() != Some(&path)
+                    {
                         crate::open_preview_path(&app, path.clone());
                         last_previewed_path = Some(path);
                     }
@@ -417,6 +419,19 @@ pub fn clear_topmost(app: &AppHandle) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
+    }
+}
+
+pub fn hide_window(app: &AppHandle) {
+    clear_topmost(app);
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(window_handle) = window.hwnd() else {
+        return;
+    };
+    unsafe {
+        let _ = ShowWindow(window_handle, SW_HIDE);
     }
 }
 

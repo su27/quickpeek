@@ -24,15 +24,21 @@ export function renderFileInfoViewer(
   source: PreviewSource,
   host: HTMLElement,
 ): FileInfoViewerResult {
+  const isDirectory = source.isDirectory === true;
   const extension = extensionOf(source.name);
   const frame = document.createElement("section");
   frame.className = "file-info-viewer";
 
   const icon = document.createElement("div");
   icon.className = "file-info-icon";
+  if (isDirectory) icon.classList.add("is-folder");
   icon.setAttribute("aria-hidden", "true");
   const badge = document.createElement("span");
-  badge.textContent = extension ? extension.slice(0, 7).toLocaleUpperCase() : "FILE";
+  badge.textContent = isDirectory
+    ? "文件夹"
+    : extension
+      ? extension.slice(0, 7).toLocaleUpperCase()
+      : "FILE";
   icon.append(badge);
 
   const name = document.createElement("h1");
@@ -41,11 +47,15 @@ export function renderFileInfoViewer(
 
   const type = document.createElement("p");
   type.className = "file-info-type";
-  type.textContent = extension ? `${extension.toLocaleUpperCase()} 文件` : "文件";
+  type.textContent = isDirectory
+    ? "文件夹"
+    : extension
+      ? `${extension.toLocaleUpperCase()} 文件`
+      : "文件";
 
   const details = document.createElement("dl");
   details.className = "file-info-details";
-  addDetail(details, "大小", formatBytes(source.size));
+  if (!isDirectory) addDetail(details, "大小", formatBytes(source.size));
   if (source.modifiedAt) {
     addDetail(details, "修改时间", new Date(source.modifiedAt).toLocaleString());
   }

@@ -3,8 +3,5 @@ dist/
 src-tauri/target/
 src-tauri/target-*/
 *.log
+*.reg
 .DS_Store
-/1.jpg
-/2.jpg
-/3.jpg
-/Cursor-0.45.14-stale-uninstall-entry-backup.reg

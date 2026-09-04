@@ -5,6 +5,7 @@ export type DocumentKind =
   | "audio"
   | "docx"
   | "file"
+  | "folder"
   | "image"
   | "pdf"
   | "pptx"
@@ -18,6 +19,7 @@ export type PreviewDimensions = {
 };
 
 type PreviewMetadata = {
+  isDirectory?: boolean;
   mimeType: string;
   modifiedAt?: number;
   name: string;
@@ -86,6 +88,19 @@ const unknownFormat: DocumentFormat = {
   extensions: [],
   loadMode: "metadata",
   mimeType: "application/octet-stream",
+  searchable: false,
+  async render(source, { host }) {
+    const { renderFileInfoViewer } = await import("./file-info-viewer");
+    const viewer = renderFileInfoViewer(source, host);
+    return noController({ fixedPageLabel: "" }, viewer.destroy);
+  },
+};
+
+const folderFormat: DocumentFormat = {
+  kind: "folder",
+  extensions: [],
+  loadMode: "metadata",
+  mimeType: "inode/directory",
   searchable: false,
   async render(source, { host }) {
     const { renderFileInfoViewer } = await import("./file-info-viewer");
@@ -311,7 +326,8 @@ export function extensionOf(name: string): string {
   return name.toLocaleLowerCase().split(".").pop() ?? "";
 }
 
-export function findDocumentFormat(name: string): DocumentFormat {
+export function findDocumentFormat(name: string, isDirectory = false): DocumentFormat {
+  if (isDirectory) return folderFormat;
   return formatsByExtension.get(extensionOf(name)) ?? unknownFormat;
 }
 

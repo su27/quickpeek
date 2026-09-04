@@ -7,12 +7,10 @@ export type ImageViewerResult = {
 };
 
 export async function renderImageViewer(
-  bytes: ArrayBuffer,
+  url: string,
   name: string,
-  mimeType: string,
   host: HTMLElement,
 ): Promise<ImageViewerResult> {
-  const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
   const frame = document.createElement("div");
   frame.className = "image-viewer";
   const canvas = document.createElement("div");
@@ -33,7 +31,7 @@ export async function renderImageViewer(
     await new Promise<void>((resolve, reject) => {
       image.addEventListener("load", () => resolve(), { once: true });
       image.addEventListener("error", () => reject(new Error("图片解码失败")), { once: true });
-      image.src = objectUrl;
+      image.src = url;
     });
     if (typeof image.decode === "function") {
       try {
@@ -43,7 +41,6 @@ export async function renderImageViewer(
       }
     }
   } catch (error) {
-    URL.revokeObjectURL(objectUrl);
     frame.remove();
     throw error;
   }
@@ -196,7 +193,6 @@ export async function renderImageViewer(
       frame.removeEventListener("pointerup", finishPan);
       frame.removeEventListener("pointercancel", finishPan);
       image.removeAttribute("src");
-      URL.revokeObjectURL(objectUrl);
       frame.remove();
     },
   };

@@ -57,9 +57,11 @@ type ExcelPreviewInternals = JsExcelPreview & {
 
 type StyleAwarePreviewOptions = ExcelPreviewOptions & {
   transformData?: (sheets: PreviewSheet[]) => PreviewSheet[];
+  xls?: boolean;
 };
 
 type ExcelViewerOptions = {
+  convertWorkbook: boolean;
   onSheetChange: (index: number, count: number) => void;
 };
 
@@ -85,6 +87,7 @@ export async function renderExcelViewer(
     minColLength: 0,
     minRowLength: 0,
     showContextmenu: false,
+    xls: options.convertWorkbook,
     transformData(sheets) {
       workbookData = sheets;
       return sheets;

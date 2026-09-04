@@ -1,6 +1,6 @@
 [package]
 name = "quickeye"
-version = "0.8.0"
+version = "0.9.0"
 description = "一个轻量、离线的 Windows 文件查看器"
 authors = ["su27"]
 edition = "2021"
@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]

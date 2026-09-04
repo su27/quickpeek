@@ -1,7 +1,7 @@
 use std::{
     ffi::c_void,
     path::PathBuf,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -23,8 +23,8 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU,
-                VK_RIGHT, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
+                GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN,
+                VK_MENU, VK_RIGHT, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
             },
             Shell::{
                 IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2, SID_STopLevelBrowser,
@@ -44,11 +44,16 @@ use windows::{
 
 const WM_QUICKEYE_OPEN: u32 = WM_APP + 0x51;
 const WM_QUICKEYE_REFRESH: u32 = WM_APP + 0x52;
+const WM_QUICKEYE_HIDE: u32 = WM_APP + 0x53;
 const REFRESH_TIMER_ID: usize = 0x5145;
 const LOW_MEMORY_DELAY: Duration = Duration::from_secs(30);
 
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static SPACE_IS_DOWN: AtomicBool = AtomicBool::new(false);
+static ESCAPE_IS_DOWN: AtomicBool = AtomicBool::new(false);
+static PREVIEW_IS_VISIBLE: AtomicBool = AtomicBool::new(false);
+static PREVIEW_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
+static SHOW_GENERATION: AtomicU32 = AtomicU32::new(0);
 static MEMORY_MODE_GENERATION: AtomicU32 = AtomicU32::new(0);
 
 fn set_low_memory_mode(app: &AppHandle, low: bool) {
@@ -157,6 +162,11 @@ fn explorer_file_view_is_foreground(window: HWND) -> bool {
     is_explorer_file_view_class(&focus_class)
 }
 
+fn preview_window_is_foreground(window: HWND) -> bool {
+    let preview_window = PREVIEW_WINDOW_HANDLE.load(Ordering::SeqCst);
+    preview_window != 0 && window.0 as isize == preview_window
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
@@ -173,6 +183,32 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     let _ = unsafe {
                         PostThreadMessageW(thread_id, WM_QUICKEYE_REFRESH, WPARAM(0), LPARAM(0))
                     };
+                }
+            }
+        }
+
+        if key.vkCode == VK_ESCAPE.0 as u32 && !key.flags.contains(LLKHF_INJECTED) {
+            if message == WM_KEYUP || message == WM_SYSKEYUP {
+                if ESCAPE_IS_DOWN.swap(false, Ordering::SeqCst) {
+                    return LRESULT(1);
+                }
+            } else if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
+                if ESCAPE_IS_DOWN.load(Ordering::SeqCst) {
+                    return LRESULT(1);
+                }
+                let foreground = unsafe { GetForegroundWindow() };
+                if PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+                    && (explorer_file_view_is_foreground(foreground)
+                        || preview_window_is_foreground(foreground))
+                {
+                    ESCAPE_IS_DOWN.store(true, Ordering::SeqCst);
+                    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
+                    if thread_id != 0 {
+                        let _ = unsafe {
+                            PostThreadMessageW(thread_id, WM_QUICKEYE_HIDE, WPARAM(0), LPARAM(0))
+                        };
+                    }
+                    return LRESULT(1);
                 }
             }
         }
@@ -197,6 +233,17 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     if thread_id != 0 {
                         let _ = unsafe {
                             PostThreadMessageW(thread_id, WM_QUICKEYE_OPEN, WPARAM(0), LPARAM(0))
+                        };
+                    }
+                    return LRESULT(1);
+                } else if PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+                    && preview_window_is_foreground(foreground)
+                {
+                    SPACE_IS_DOWN.store(true, Ordering::SeqCst);
+                    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
+                    if thread_id != 0 {
+                        let _ = unsafe {
+                            PostThreadMessageW(thread_id, WM_QUICKEYE_HIDE, WPARAM(0), LPARAM(0))
                         };
                     }
                     return LRESULT(1);
@@ -259,13 +306,16 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
                 let foreground = unsafe { GetForegroundWindow() };
                 if explorer_file_view_is_foreground(foreground) {
                     if let Ok(Some(path)) = selected_file(foreground) {
-                        if path.is_file() && crate::is_supported_path(&path) {
+                        if path.is_file() {
                             crate::open_preview_path(&app, path.clone());
                             last_previewed_path = Some(path);
                         }
                     }
                 }
             }
+        } else if message.message == WM_QUICKEYE_HIDE {
+            crate::hide_preview(&app);
+            last_previewed_path = None;
         } else if message.message == WM_QUICKEYE_REFRESH {
             if refresh_timer_id.is_none() {
                 let timer_id = unsafe { SetTimer(None, REFRESH_TIMER_ID, 35, None) };
@@ -286,10 +336,7 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
             let foreground = unsafe { GetForegroundWindow() };
             if is_visible && explorer_file_view_is_foreground(foreground) {
                 if let Ok(Some(path)) = selected_file(foreground) {
-                    if path.is_file()
-                        && crate::is_supported_path(&path)
-                        && last_previewed_path.as_ref() != Some(&path)
-                    {
+                    if path.is_file() && last_previewed_path.as_ref() != Some(&path) {
                         crate::open_preview_path(&app, path.clone());
                         last_previewed_path = Some(path);
                     }
@@ -304,6 +351,11 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
 }
 
 pub fn start(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(window_handle) = window.hwnd() {
+            PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
+        }
+    }
     std::thread::spawn(move || {
         if let Err(error) = unsafe { run_hook_loop(app) } {
             eprintln!("无法启动空格预览监听：{error}");
@@ -319,16 +371,35 @@ pub fn show_without_activation(app: &AppHandle) {
         return;
     };
 
-    let _ = window.set_focusable(false);
-    let _ = window.show();
-    unsafe {
+    PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
+    PREVIEW_IS_VISIBLE.store(true, Ordering::SeqCst);
+    let generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let shown = unsafe {
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
-        let _ = SetWindowPos(window_handle, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        SetWindowPos(window_handle, Some(HWND_TOPMOST), 0, 0, 0, 0, flags)
+    };
+    if shown.is_err() {
+        let _ = window.show();
     }
-    let _ = window.set_focusable(true);
+
+    let window_handle_value = window_handle.0 as isize;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        if PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+            && SHOW_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            let delayed_window = HWND(window_handle_value as *mut c_void);
+            unsafe {
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+                let _ = SetWindowPos(delayed_window, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            }
+        }
+    });
 }
 
 pub fn clear_topmost(app: &AppHandle) {
+    PREVIEW_IS_VISIBLE.store(false, Ordering::SeqCst);
+    SHOW_GENERATION.fetch_add(1, Ordering::SeqCst);
     let Some(window) = app.get_webview_window("main") else {
         return;
     };

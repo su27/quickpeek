@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "quickeye",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "identifier": "com.su27.quickeye",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,6 +17,7 @@
         "height": 600,
         "minWidth": 320,
         "minHeight": 220,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required",
         "center": true,
         "resizable": true,
         "fullscreen": false,
@@ -25,7 +26,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:"
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      },
+      "csp": "default-src 'self'; connect-src 'self' blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: http://asset.localhost; media-src 'self' blob: asset: http://asset.localhost; frame-src 'self' blob: asset: http://asset.localhost; font-src 'self' blob: data:"
     }
   },
   "bundle": {
@@ -34,41 +39,67 @@
     "category": "Productivity",
     "fileAssociations": [
       {
-        "ext": ["docx"],
-        "name": "DOCX 文档",
-        "description": "DOCX 文档",
+        "ext": ["docm", "docx", "dotm", "dotx"],
+        "name": "Word 文档",
+        "description": "Open XML Word 文档",
         "role": "Viewer",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       },
       {
-        "ext": ["xlsx"],
-        "name": "XLSX 工作簿",
-        "description": "XLSX 工作簿",
+        "ext": ["csv", "ods", "tsv", "xls", "xlsb", "xlsm", "xlsx", "xltm", "xltx"],
+        "name": "电子表格",
+        "description": "电子表格文件",
         "role": "Viewer",
         "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       },
       {
-        "ext": ["pptx"],
-        "name": "PPTX 演示文稿",
-        "description": "PPTX 演示文稿",
+        "ext": ["potm", "potx", "ppsm", "ppsx", "pptm", "pptx"],
+        "name": "PowerPoint 演示文稿",
+        "description": "Open XML PowerPoint 演示文稿",
         "role": "Viewer",
         "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
       },
       {
-        "ext": ["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"],
+        "ext": ["pdf"],
+        "name": "PDF 文档",
+        "description": "PDF 文档",
+        "role": "Viewer",
+        "mimeType": "application/pdf"
+      },
+      {
+        "ext": ["apng", "avif", "bmp", "gif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "webp"],
         "name": "图片",
         "description": "图片",
         "role": "Viewer"
       },
       {
-        "ext": ["bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css", "csv", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "swift", "toml", "ts", "tsv", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh"],
+        "ext": ["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav"],
+        "name": "音频",
+        "description": "音频文件",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["m4v", "mov", "mp4", "ogv", "webm"],
+        "name": "视频",
+        "description": "视频文件",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["zip"],
+        "name": "ZIP 压缩包",
+        "description": "ZIP 压缩包目录",
+        "role": "Viewer",
+        "mimeType": "application/zip"
+      },
+      {
+        "ext": ["bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh"],
         "name": "文本和代码",
         "description": "文本和代码文件",
         "role": "Viewer"
       }
     ],
     "shortDescription": "极简、离线的文件查看器",
-    "longDescription": "quickeye 是一个仅在本机解析 Office 文档、图片、文本和代码的只读查看器。",
+    "longDescription": "quickeye 是一个仅在本机解析文档、表格、演示文稿、PDF、图片、音视频、压缩包目录、文本和代码的只读查看器。",
     "windows": {
       "nsis": {
         "installMode": "currentUser"

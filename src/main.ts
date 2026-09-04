@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   acceptedFileExtensions,
   findDocumentFormat,
@@ -44,6 +44,7 @@ type ActiveDocument = {
 };
 
 type NativePreviewRequest = {
+  modifiedAt?: number;
   path: string;
   size: number;
 };
@@ -195,6 +196,27 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
         width = dimensions.width * scale;
         height = dimensions.height * scale;
       }
+    } else if (kind === "video" && dimensions) {
+      const fitScale = Math.min(
+        maximumWidth / dimensions.width,
+        maximumHeight / dimensions.height,
+      );
+      const comfortableScale = Math.max(
+        1,
+        Math.min(1.75, 640 / dimensions.width, 360 / dimensions.height),
+      );
+      const scale = Math.min(fitScale, comfortableScale);
+      width = dimensions.width * scale;
+      height = dimensions.height * scale;
+    } else if (kind === "audio") {
+      width = Math.min(maximumWidth, 620);
+      height = Math.min(maximumHeight, 220);
+    } else if (kind === "file") {
+      width = Math.min(maximumWidth, 620);
+      height = Math.min(maximumHeight, 430);
+    } else if (kind === "pdf") {
+      width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
+      height = maximumHeight;
     } else if (kind === "docx" && dimensions) {
       width = clamp(
         dimensions.width + 40,
@@ -311,6 +333,27 @@ function destroyRenderedDocument(rendered: RenderedDocument | undefined): void {
   }
 }
 
+function keepSourceAlive(
+  rendered: RenderedDocument,
+  release: (() => void) | undefined,
+): RenderedDocument {
+  if (!release) return rendered;
+  let released = false;
+  return {
+    ...rendered,
+    destroy() {
+      try {
+        rendered.destroy();
+      } finally {
+        if (!released) {
+          released = true;
+          release();
+        }
+      }
+    },
+  };
+}
+
 function clearRenderedDocument(): void {
   if (pageIndicatorFrame) cancelAnimationFrame(pageIndicatorFrame);
   pageIndicatorFrame = 0;
@@ -348,7 +391,7 @@ function updatePageIndicator(): void {
   }
 
   const fixedPageLabel = activeDocument?.rendered.fixedPageLabel;
-  if (fixedPageLabel) {
+  if (fixedPageLabel !== null && fixedPageLabel !== undefined) {
     setPageLabel(fixedPageLabel);
     return;
   }
@@ -444,9 +487,11 @@ async function loadPreview(
   setLoading(true);
   let host: HTMLElement | null = null;
   let rendered: RenderedDocument | null = null;
+  let releaseSource: (() => void) | undefined;
 
   try {
     const source = await readSource();
+    releaseSource = source.release;
     if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
       return false;
@@ -456,12 +501,14 @@ async function loadPreview(
     host.className = "document-host is-staging";
     host.setAttribute("aria-hidden", "true");
     documentViewport.append(host);
-    rendered = await format.render(source, {
+    const formatRendered = await format.render(source, {
       host,
       viewport: documentViewport,
       isActive: () => host === documentHost,
       setPageLabel,
     });
+    rendered = keepSourceAlive(formatRendered, releaseSource);
+    releaseSource = undefined;
     if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
       return false;
@@ -493,25 +540,45 @@ async function loadPreview(
     showToast("文件打开失败，请确认文件未损坏且格式受支持", "error");
     return false;
   } finally {
+    releaseSource?.();
     if (request === loadSequence) setLoading(false);
   }
 }
 
 async function loadFile(file: File, request: number): Promise<boolean> {
   const format = findDocumentFormat(file.name);
-  if (!format) {
-    showToast("暂不支持这种文件格式", "error");
-    return false;
-  }
 
   return loadPreview(
     format,
     request,
     async () => {
+      if (format.loadMode === "metadata") {
+        return {
+          type: "metadata" as const,
+          mimeType: file.type || "application/octet-stream",
+          modifiedAt: file.lastModified,
+          name: file.name,
+          size: file.size,
+        };
+      }
+      if (format.loadMode === "url") {
+        const url = URL.createObjectURL(file);
+        return {
+          type: "url" as const,
+          url,
+          release: () => URL.revokeObjectURL(url),
+          mimeType: file.type || mimeTypeFor(file.name, format),
+          modifiedAt: file.lastModified,
+          name: file.name,
+          size: file.size,
+        };
+      }
       const end = Math.min(file.size, format.maxReadBytes ?? file.size);
       return {
+        type: "buffer" as const,
         bytes: await file.slice(0, end).arrayBuffer(),
         mimeType: file.type || mimeTypeFor(file.name, format),
+        modifiedAt: file.lastModified,
         name: file.name,
         size: file.size,
       };
@@ -535,23 +602,47 @@ function reportFrontendError(context: string, error: unknown): void {
 }
 
 async function loadDocumentFromPath(
-  path: string,
-  sourceSize: number,
+  preview: NativePreviewRequest,
   request: number,
 ): Promise<void> {
+  const { modifiedAt, path, size: sourceSize } = preview;
   const name = fileNameFromPath(path);
   const format = findDocumentFormat(name);
-  if (!format) return;
 
   const loaded = await loadPreview(
     format,
     request,
     async () => {
+      if (format.loadMode === "metadata") {
+        return {
+          type: "metadata" as const,
+          mimeType: "application/octet-stream",
+          modifiedAt,
+          name,
+          path,
+          size: sourceSize,
+        };
+      }
+      if (format.loadMode === "url") {
+        await invoke("allow_preview_asset", { path });
+        return {
+          type: "url" as const,
+          url: convertFileSrc(path),
+          mimeType: mimeTypeFor(name, format),
+          modifiedAt,
+          name,
+          path,
+          size: sourceSize,
+        };
+      }
       const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("read_preview_file", { path });
       return {
+        type: "buffer" as const,
         bytes: normalizeIpcBytes(payload),
         mimeType: mimeTypeFor(name, format),
+        modifiedAt,
         name,
+        path,
         size: sourceSize,
       };
     },
@@ -571,7 +662,7 @@ async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void
       const nextPreview = queuedNativeRequest;
       const request = loadSequence;
       queuedNativeRequest = null;
-      await loadDocumentFromPath(nextPreview.path, nextPreview.size, request);
+      await loadDocumentFromPath(nextPreview, request);
     }
   } finally {
     nativeLoadInProgress = false;
@@ -769,10 +860,12 @@ workspace.addEventListener("drop", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && isTauri()) {
+  const dismissesPreview = event.key === "Escape"
+    || (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey);
+  if (dismissesPreview && isTauri() && activeDocument) {
     event.preventDefault();
-    if (app.classList.contains("is-search-open")) closeSearch();
-    else void invoke("hide_preview_window");
+    event.stopImmediatePropagation();
+    if (!event.repeat) void invoke("hide_preview_window");
     return;
   }
 
@@ -790,7 +883,7 @@ document.addEventListener("keydown", (event) => {
     if (activeDocument.format.kind === "docx") window.print();
     else showToast("当前格式暂不支持打印");
   }
-});
+}, { capture: true });
 
 resetViewer();
 void initializeNativePreview();

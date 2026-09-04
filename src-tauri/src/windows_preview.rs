@@ -1,7 +1,10 @@
 use std::{
     ffi::c_void,
     path::PathBuf,
-    sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+        Mutex, OnceLock,
+    },
     time::Duration,
 };
 
@@ -10,9 +13,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
 };
 use windows::{
-    core::Interface,
+    core::{w, Interface, HSTRING, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
@@ -22,21 +25,27 @@ use windows::{
             Variant::VARIANT,
         },
         UI::{
+            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN,
                 VK_MENU, VK_RIGHT, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
             },
             Shell::{
-                IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2, SID_STopLevelBrowser,
-                ShellWindows, SIGDN_FILESYSPATH,
+                AssocQueryStringW, IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2,
+                SID_STopLevelBrowser, ShellExecuteW, ShellWindows, ASSOCF_INIT_IGNOREUNKNOWN,
+                ASSOCSTR_FRIENDLYAPPNAME, SIGDN_FILESYSPATH,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
-                GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos,
-                SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, GUITHREADINFO, HC_ACTION,
-                HWND_NOTOPMOST, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WH_KEYBOARD_LL, WM_APP,
-                WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+                CallNextHookEx, CallWindowProcW, CreateWindowExW, GetClassNameW,
+                GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect,
+                GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer,
+                SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
+                UnhookWindowsHookEx, BS_PUSHBUTTON, GUITHREADINFO, GWLP_WNDPROC, HC_ACTION,
+                HWND_NOTOPMOST, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SM_CXSIZE,
+                SM_CYSIZE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WM_APP, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
     },
@@ -55,6 +64,10 @@ static PREVIEW_IS_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PREVIEW_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static SHOW_GENERATION: AtomicU32 = AtomicU32::new(0);
 static MEMORY_MODE_GENERATION: AtomicU32 = AtomicU32::new(0);
+static OPEN_BUTTON_HANDLE: AtomicIsize = AtomicIsize::new(0);
+static OPEN_BUTTON_ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
+static OPEN_BUTTON_LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(36);
+static CURRENT_PREVIEW_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn set_low_memory_mode(app: &AppHandle, low: bool) {
     let Some(window) = app.get_webview_window("main") else {
@@ -285,6 +298,209 @@ fn selected_file(foreground: HWND) -> windows::core::Result<Option<PathBuf>> {
     Ok(None)
 }
 
+fn preview_path_store() -> &'static Mutex<Option<PathBuf>> {
+    CURRENT_PREVIEW_PATH.get_or_init(|| Mutex::new(None))
+}
+
+fn default_application_name(path: &std::path::Path) -> Option<String> {
+    if path.is_dir() {
+        return Some("文件资源管理器".to_string());
+    }
+    let extension = path.extension()?.to_str()?;
+    let association = HSTRING::from(format!(".{extension}"));
+    let mut length = 0_u32;
+    unsafe {
+        let _ = AssocQueryStringW(
+            ASSOCF_INIT_IGNOREUNKNOWN,
+            ASSOCSTR_FRIENDLYAPPNAME,
+            &association,
+            PCWSTR::null(),
+            None,
+            &mut length,
+        );
+    }
+    if length <= 1 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; length as usize];
+    let result = unsafe {
+        AssocQueryStringW(
+            ASSOCF_INIT_IGNOREUNKNOWN,
+            ASSOCSTR_FRIENDLYAPPNAME,
+            &association,
+            PCWSTR::null(),
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &mut length,
+        )
+    };
+    if result.is_err() || length <= 1 {
+        return None;
+    }
+    let name = String::from_utf16_lossy(&buffer[..length.saturating_sub(1) as usize]);
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn open_current_preview_with_default_application() {
+    let path = preview_path_store()
+        .lock()
+        .ok()
+        .and_then(|path| path.clone());
+    let Some(path) = path else {
+        return;
+    };
+    let path = HSTRING::from(path.to_string_lossy().as_ref());
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &path,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        crate::diagnostic_log("Windows 默认程序无法打开当前预览目标");
+    }
+}
+
+fn original_open_button_proc() -> WNDPROC {
+    let address = OPEN_BUTTON_ORIGINAL_PROC.load(Ordering::SeqCst);
+    if address == 0 {
+        None
+    } else {
+        Some(unsafe {
+            std::mem::transmute::<
+                isize,
+                unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+            >(address)
+        })
+    }
+}
+
+unsafe extern "system" fn open_button_window_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let result =
+        unsafe { CallWindowProcW(original_open_button_proc(), window, message, wparam, lparam) };
+    if message == WM_LBUTTONUP {
+        open_current_preview_with_default_application();
+    }
+    result
+}
+
+fn install_open_button(preview_window: HWND) {
+    if OPEN_BUTTON_HANDLE.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    let button = unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            w!("BUTTON"),
+            w!("↗"),
+            WS_POPUP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            0,
+            0,
+            36,
+            24,
+            Some(preview_window),
+            None,
+            None,
+            None,
+        )
+    };
+    let Ok(button) = button else {
+        crate::diagnostic_log("无法创建标题栏默认程序按钮");
+        return;
+    };
+    let original = unsafe {
+        SetWindowLongPtrW(
+            button,
+            GWLP_WNDPROC,
+            open_button_window_proc as *const () as isize,
+        )
+    };
+    OPEN_BUTTON_ORIGINAL_PROC.store(original, Ordering::SeqCst);
+    OPEN_BUTTON_HANDLE.store(button.0 as isize, Ordering::SeqCst);
+}
+
+fn position_open_button_handles(preview_window: HWND, button: HWND) {
+    if !PREVIEW_IS_VISIBLE.load(Ordering::SeqCst) {
+        unsafe {
+            let _ = ShowWindow(button, SW_HIDE);
+        }
+        return;
+    }
+    let mut bounds = RECT::default();
+    if unsafe { GetWindowRect(preview_window, &mut bounds) }.is_err() {
+        return;
+    }
+    let dpi = unsafe { GetDpiForWindow(preview_window) }.max(96);
+    let scale = dpi as f64 / 96.0;
+    let caption_button_width =
+        unsafe { GetSystemMetricsForDpi(SM_CXSIZE, dpi) }.max((46.0 * scale).round() as i32);
+    let caption_height =
+        unsafe { GetSystemMetricsForDpi(SM_CYSIZE, dpi) }.max((30.0 * scale).round() as i32);
+    let width = ((OPEN_BUTTON_LOGICAL_WIDTH.load(Ordering::SeqCst) as f64) * scale).round() as i32;
+    let horizontal_margin = (8.0 * scale).round() as i32;
+    let height = (caption_height - (6.0 * scale).round() as i32).max(22);
+    let x = bounds.right - caption_button_width * 3 - horizontal_margin - width;
+    let y = bounds.top + ((caption_height - height) / 2).max(1);
+    unsafe {
+        let _ = SetWindowPos(
+            button,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+pub fn position_open_button(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(preview_window) = window.hwnd() else {
+        return;
+    };
+    let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
+    if button == 0 {
+        return;
+    }
+    position_open_button_handles(preview_window, HWND(button as *mut c_void));
+}
+
+pub fn set_preview_target(app: &AppHandle, path: &std::path::Path) {
+    if let Ok(mut target) = preview_path_store().lock() {
+        *target = Some(path.to_path_buf());
+    }
+    let application = default_application_name(path);
+    let label = application
+        .as_deref()
+        .map(|application| format!("↗  用 {application} 打开"))
+        .unwrap_or_else(|| "↗".to_string());
+    let width = if application.is_some() {
+        (42 + label.encode_utf16().count() as u32 * 8).clamp(112, 230)
+    } else {
+        36
+    };
+    OPEN_BUTTON_LOGICAL_WIDTH.store(width, Ordering::SeqCst);
+    let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
+    if button != 0 {
+        unsafe {
+            let _ = SetWindowTextW(HWND(button as *mut c_void), &HSTRING::from(label));
+        }
+        position_open_button(app);
+    }
+}
+
 unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
     HOOK_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
@@ -356,6 +572,7 @@ pub fn start(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(window_handle) = window.hwnd() {
             PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
+            install_open_button(window_handle);
         }
     }
     std::thread::spawn(move || {
@@ -376,6 +593,9 @@ pub fn show_without_activation(app: &AppHandle) {
     PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
     PREVIEW_IS_VISIBLE.store(true, Ordering::SeqCst);
     let generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    unsafe {
+        let _ = ShowWindow(window_handle, SW_SHOWNOACTIVATE);
+    }
     let shown = unsafe {
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
         SetWindowPos(window_handle, Some(HWND_TOPMOST), 0, 0, 0, 0, flags)
@@ -383,6 +603,7 @@ pub fn show_without_activation(app: &AppHandle) {
     if shown.is_err() {
         let _ = window.show();
     }
+    position_open_button(app);
 
     let window_handle_value = window_handle.0 as isize;
     std::thread::spawn(move || {
@@ -394,6 +615,10 @@ pub fn show_without_activation(app: &AppHandle) {
             unsafe {
                 let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
                 let _ = SetWindowPos(delayed_window, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            }
+            let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
+            if button != 0 {
+                position_open_button_handles(delayed_window, HWND(button as *mut c_void));
             }
         }
     });
@@ -424,6 +649,12 @@ pub fn clear_topmost(app: &AppHandle) {
 
 pub fn hide_window(app: &AppHandle) {
     clear_topmost(app);
+    let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
+    if button != 0 {
+        unsafe {
+            let _ = ShowWindow(HWND(button as *mut c_void), SW_HIDE);
+        }
+    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };

@@ -13,6 +13,8 @@ use tauri::{
 
 #[cfg(target_os = "windows")]
 mod windows_preview;
+#[cfg(target_os = "windows")]
+mod windows_shell_icon;
 
 const MAX_TEXT_PREVIEW_BYTES: u64 = 20 * 1024 * 1024;
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -131,8 +133,11 @@ fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
 }
 
 #[tauri::command]
-fn get_initial_preview() -> Option<PreviewRequest> {
-    initial_preview_path().and_then(preview_request)
+fn get_initial_preview(app: AppHandle) -> Option<PreviewRequest> {
+    let path = initial_preview_path()?;
+    #[cfg(target_os = "windows")]
+    windows_preview::set_preview_target(&app, &path);
+    preview_request(path)
 }
 
 #[tauri::command]
@@ -174,6 +179,22 @@ fn allow_preview_asset(path: String, app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("无法授权预览文件：{error}"))
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn read_shell_icon(path: String) -> Result<tauri::ipc::Response, String> {
+    let path = PathBuf::from(path);
+    if !path.is_file() && !path.is_dir() {
+        return Err("文件或文件夹不存在".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        windows_shell_icon::read(&path)
+            .map(tauri::ipc::Response::new)
+            .map_err(|error| format!("无法读取 Windows 文件图标：{error}"))
+    })
+    .await
+    .map_err(|error| format!("图标读取任务失败：{error}"))?
+}
+
 pub(crate) fn hide_preview(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     windows_preview::hide_window(app);
@@ -193,6 +214,8 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
 
     #[cfg(target_os = "windows")]
     windows_preview::prepare_for_use(app);
+    #[cfg(target_os = "windows")]
+    windows_preview::set_preview_target(app, &path);
     if let Some(preview) = preview_request(path) {
         let _ = app.emit_to("main", "preview-file", preview);
     }
@@ -258,16 +281,23 @@ pub fn run() {
             windows_preview::start(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 hide_preview(window.app_handle());
             }
+            #[cfg(target_os = "windows")]
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                windows_preview::position_open_button(window.app_handle());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_initial_preview,
             read_preview_file,
             allow_preview_asset,
+            #[cfg(target_os = "windows")]
+            read_shell_icon,
             show_preview_window,
             hide_preview_window,
             log_frontend_error

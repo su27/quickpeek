@@ -531,6 +531,13 @@ kbd {
   box-shadow: 0 14px 30px rgba(28, 39, 52, 0.14);
 }
 
+.file-info-shell-icon {
+  width: 112px;
+  height: 112px;
+  margin-bottom: 18px;
+  object-fit: contain;
+}
+
 .file-info-icon::before {
   position: absolute;
   top: -1px;

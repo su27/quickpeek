@@ -1,12 +1,14 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   acceptedFileExtensions,
+  fileInfoDocumentFormat,
   findDocumentFormat,
   mimeTypeFor,
   type DocumentFormat,
   type DocumentKind,
   type PreviewSource,
   type RenderedDocument,
+  type ShellIcon,
 } from "./document-formats";
 import {
   imageOverflowMode,
@@ -213,9 +215,9 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
     } else if (kind === "audio") {
       width = Math.min(maximumWidth, 620);
       height = Math.min(maximumHeight, 220);
-    } else if (kind === "file") {
-      width = Math.min(maximumWidth, 620);
-      height = Math.min(maximumHeight, 430);
+    } else if (kind === "file" || kind === "folder") {
+      width = Math.min(maximumWidth, 540);
+      height = Math.min(maximumHeight, 360);
     } else if (kind === "pdf") {
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
       height = maximumHeight;
@@ -259,6 +261,25 @@ function normalizeIpcBytes(payload: ArrayBuffer | Uint8Array | number[]): ArrayB
   const buffer = new ArrayBuffer(source.byteLength);
   new Uint8Array(buffer).set(source);
   return buffer;
+}
+
+async function loadShellIcon(path: string): Promise<ShellIcon | undefined> {
+  try {
+    const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("read_shell_icon", { path });
+    const bytes = normalizeIpcBytes(payload);
+    if (bytes.byteLength < 8) return undefined;
+    const view = new DataView(bytes);
+    const width = view.getUint32(0, true);
+    const height = view.getUint32(4, true);
+    const expectedBytes = width * height * 4;
+    if (width === 0 || height === 0 || bytes.byteLength !== expectedBytes + 8) return undefined;
+    const pixels = new Uint8ClampedArray(expectedBytes);
+    pixels.set(new Uint8Array(bytes, 8));
+    return { height, pixels, width };
+  } catch (error) {
+    reportFrontendError(`read Windows icon for ${path}`, error);
+    return undefined;
+  }
 }
 
 function showToast(message: string, kind: "info" | "error" = "info"): void {
@@ -485,6 +506,7 @@ async function loadPreview(
   request: number,
   readSource: () => Promise<PreviewSource>,
   errorContext: string,
+  showFailureToast = true,
 ): Promise<boolean> {
   closeSearch();
   setLoading(true);
@@ -540,7 +562,9 @@ async function loadPreview(
       setControlsEnabled(true);
       configureControlsForFormat(activeDocument.format);
     }
-    showToast("文件打开失败，请确认文件未损坏且格式受支持", "error");
+    if (showFailureToast) {
+      showToast("文件打开失败，请确认文件未损坏且格式受支持", "error");
+    }
     return false;
   } finally {
     releaseSource?.();
@@ -611,21 +635,29 @@ async function loadDocumentFromPath(
   const { isDirectory, modifiedAt, path, size: sourceSize } = preview;
   const name = fileNameFromPath(path);
   const format = findDocumentFormat(name, isDirectory);
+  let shellIconPromise: Promise<ShellIcon | undefined> | null = null;
+  const metadataSource = async (): Promise<PreviewSource> => ({
+    type: "metadata",
+    isDirectory,
+    mimeType: isDirectory ? "inode/directory" : "application/octet-stream",
+    modifiedAt,
+    name,
+    path,
+    shellIcon: await (shellIconPromise ??= loadShellIcon(path)),
+    size: sourceSize,
+  });
+
+  // Show a target-bound loading view immediately. Large workbooks can spend seconds parsing;
+  // keeping the window hidden for that entire time makes the Space shortcut look broken.
+  setLoading(true);
+  await invoke("show_preview_window");
 
   const loaded = await loadPreview(
     format,
     request,
     async () => {
       if (format.loadMode === "metadata") {
-        return {
-          type: "metadata" as const,
-          isDirectory,
-          mimeType: "application/octet-stream",
-          modifiedAt,
-          name,
-          path,
-          size: sourceSize,
-        };
+        return metadataSource();
       }
       if (format.loadMode === "url") {
         await invoke("allow_preview_asset", { path });
@@ -653,8 +685,21 @@ async function loadDocumentFromPath(
       };
     },
     `open ${path}`,
+    false,
   );
-  if (loaded) await invoke("show_preview_window");
+  if (loaded) {
+    await invoke("show_preview_window");
+    return;
+  }
+
+  if (request !== loadSequence || format.kind === "file" || format.kind === "folder") return;
+  const fallbackLoaded = await loadPreview(
+    fileInfoDocumentFormat(isDirectory),
+    request,
+    metadataSource,
+    `show file information for ${path}`,
+  );
+  if (fallbackLoaded) await invoke("show_preview_window");
 }
 
 async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void> {

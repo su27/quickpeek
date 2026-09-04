@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "quickpeek"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "serde",
  "tauri",

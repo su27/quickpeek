@@ -88,6 +88,7 @@ export async function renderAudioViewer(
   title.className = "audio-viewer-title";
   title.textContent = name;
   const audio = document.createElement("audio");
+  audio.autoplay = true;
   audio.controls = true;
   audio.preload = "metadata";
   const source = document.createElement("source");
@@ -101,6 +102,7 @@ export async function renderAudioViewer(
 
   try {
     await waitForMetadata(audio, "音频");
+    await audio.play();
   } catch (error) {
     releaseMedia(audio);
     frame.remove();

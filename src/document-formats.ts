@@ -18,12 +18,19 @@ export type PreviewDimensions = {
   width: number;
 };
 
+export type ShellIcon = {
+  height: number;
+  pixels: Uint8ClampedArray;
+  width: number;
+};
+
 type PreviewMetadata = {
   isDirectory?: boolean;
   mimeType: string;
   modifiedAt?: number;
   name: string;
   path?: string;
+  shellIcon?: ShellIcon;
   size: number;
   release?: () => void;
 };
@@ -329,6 +336,10 @@ export function extensionOf(name: string): string {
 export function findDocumentFormat(name: string, isDirectory = false): DocumentFormat {
   if (isDirectory) return folderFormat;
   return formatsByExtension.get(extensionOf(name)) ?? unknownFormat;
+}
+
+export function fileInfoDocumentFormat(isDirectory = false): DocumentFormat {
+  return isDirectory ? folderFormat : unknownFormat;
 }
 
 export function mimeTypeFor(name: string, format: DocumentFormat): string {

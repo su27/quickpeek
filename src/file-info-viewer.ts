@@ -29,17 +29,37 @@ export function renderFileInfoViewer(
   const frame = document.createElement("section");
   frame.className = "file-info-viewer";
 
-  const icon = document.createElement("div");
-  icon.className = "file-info-icon";
-  if (isDirectory) icon.classList.add("is-folder");
-  icon.setAttribute("aria-hidden", "true");
-  const badge = document.createElement("span");
-  badge.textContent = isDirectory
-    ? "文件夹"
-    : extension
-      ? extension.slice(0, 7).toLocaleUpperCase()
-      : "FILE";
-  icon.append(badge);
+  let icon: HTMLElement;
+  if (source.shellIcon) {
+    const canvas = document.createElement("canvas");
+    canvas.className = "file-info-shell-icon";
+    canvas.width = source.shellIcon.width;
+    canvas.height = source.shellIcon.height;
+    canvas.setAttribute("aria-hidden", "true");
+    canvas.getContext("2d")?.putImageData(
+      new ImageData(
+        new Uint8ClampedArray(source.shellIcon.pixels),
+        source.shellIcon.width,
+        source.shellIcon.height,
+      ),
+      0,
+      0,
+    );
+    icon = canvas;
+  } else {
+    const fallbackIcon = document.createElement("div");
+    fallbackIcon.className = "file-info-icon";
+    if (isDirectory) fallbackIcon.classList.add("is-folder");
+    fallbackIcon.setAttribute("aria-hidden", "true");
+    const badge = document.createElement("span");
+    badge.textContent = isDirectory
+      ? "文件夹"
+      : extension
+        ? extension.slice(0, 7).toLocaleUpperCase()
+        : "FILE";
+    fallbackIcon.append(badge);
+    icon = fallbackIcon;
+  }
 
   const name = document.createElement("h1");
   name.textContent = source.name;

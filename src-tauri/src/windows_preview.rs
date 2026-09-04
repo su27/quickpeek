@@ -2,9 +2,13 @@ use std::{
     ffi::c_void,
     path::PathBuf,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time::Duration,
 };
 
 use tauri::{AppHandle, Manager};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+};
 use windows::{
     core::Interface,
     Win32::{
@@ -41,9 +45,71 @@ use windows::{
 const WM_QUICKEYE_OPEN: u32 = WM_APP + 0x51;
 const WM_QUICKEYE_REFRESH: u32 = WM_APP + 0x52;
 const REFRESH_TIMER_ID: usize = 0x5145;
+const LOW_MEMORY_DELAY: Duration = Duration::from_secs(30);
 
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static SPACE_IS_DOWN: AtomicBool = AtomicBool::new(false);
+static MEMORY_MODE_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+fn set_low_memory_mode(app: &AppHandle, low: bool) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.with_webview(move |webview| {
+        let result = (|| -> windows::core::Result<()> {
+            let core = unsafe { webview.controller().CoreWebView2()? };
+            let core: ICoreWebView2_19 = core.cast()?;
+            let level = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL(if low { 1 } else { 0 });
+            unsafe { core.SetMemoryUsageTargetLevel(level)? };
+
+            // Read the value back from WebView2 instead of treating a successful setter call
+            // as proof. This keeps diagnostics useful when a runtime accepts the interface but
+            // silently ignores an unsupported target level.
+            let mut actual = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL(0);
+            unsafe { core.MemoryUsageTargetLevel(&mut actual)? };
+            if actual != level {
+                return Err(windows::core::Error::new(
+                    windows::core::HRESULT(0x8000_4005_u32 as i32),
+                    format!(
+                        "WebView2 内存模式回读不一致（期望 {}，实际 {}）",
+                        level.0, actual.0
+                    ),
+                ));
+            }
+            crate::diagnostic_log(if low {
+                "WebView2 内存模式已确认：Low"
+            } else {
+                "WebView2 内存模式已确认：Normal"
+            });
+            Ok(())
+        })();
+        if let Err(error) = result {
+            crate::diagnostic_log(&format!("WebView2 内存模式切换失败：{error}"));
+        }
+    });
+}
+
+pub fn prepare_for_use(app: &AppHandle) {
+    MEMORY_MODE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    set_low_memory_mode(app, false);
+}
+
+pub fn schedule_low_memory(app: AppHandle) {
+    let generation = MEMORY_MODE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(LOW_MEMORY_DELAY);
+        if MEMORY_MODE_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let is_visible = app
+            .get_webview_window("main")
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false);
+        if !is_visible {
+            set_low_memory_mode(&app, true);
+        }
+    });
+}
 
 fn window_class_name(window: HWND) -> String {
     let mut buffer = [0_u16; 128];

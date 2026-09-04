@@ -147,14 +147,15 @@ function countLines(text: string): number {
 }
 
 export async function renderTextViewer(
-  file: File,
+  input: ArrayBuffer,
+  name: string,
   host: HTMLElement,
-  sourceSize = file.size,
+  sourceSize = input.byteLength,
 ): Promise<TextViewerResult> {
   const truncated = sourceSize > MAX_TEXT_BYTES;
-  const bytes = new Uint8Array(await file.slice(0, MAX_TEXT_BYTES).arrayBuffer());
+  const bytes = new Uint8Array(input, 0, Math.min(input.byteLength, MAX_TEXT_BYTES));
   const { encoding, text } = decodeText(bytes);
-  const language = languageByExtension[extensionOf(file.name)];
+  const language = languageByExtension[extensionOf(name)];
   const highlighted = Boolean(language) && sourceSize <= MAX_HIGHLIGHT_BYTES;
 
   const viewer = document.createElement("section");

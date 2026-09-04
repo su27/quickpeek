@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::{
     ffi::OsString,
     fs::OpenOptions,
@@ -14,18 +15,24 @@ use tauri::{
 mod windows_preview;
 
 const MAX_TEXT_PREVIEW_BYTES: u64 = 20 * 1024 * 1024;
-const FULL_READ_EXTENSIONS: &[&str] = &[
+const BINARY_EXTENSIONS: &[&str] = &[
     "docx", "xlsx", "pptx", "avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp",
 ];
 
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "docx", "xlsx", "pptx", "avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp", "bash",
-    "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css", "csv",
-    "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js",
-    "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php",
-    "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "swift",
-    "toml", "ts", "tsv", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
+const TEXT_EXTENSIONS: &[&str] = &[
+    "bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css",
+    "csv", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini",
+    "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown",
+    "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql",
+    "svelte", "swift", "toml", "ts", "tsv", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
 ];
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewRequest {
+    path: String,
+    size: u64,
+}
 
 fn diagnostic_log(message: &str) {
     eprintln!("[quickeye] {message}");
@@ -57,8 +64,9 @@ fn is_supported_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            SUPPORTED_EXTENSIONS
+            BINARY_EXTENSIONS
                 .iter()
+                .chain(TEXT_EXTENSIONS)
                 .any(|supported| extension.eq_ignore_ascii_case(supported))
         })
 }
@@ -78,40 +86,48 @@ fn is_text_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            !FULL_READ_EXTENSIONS
+            TEXT_EXTENSIONS
                 .iter()
-                .any(|binary| extension.eq_ignore_ascii_case(binary))
+                .any(|text| extension.eq_ignore_ascii_case(text))
         })
 }
 
-#[tauri::command]
-fn get_initial_file_path() -> Option<String> {
-    initial_document_path().map(|path| path.to_string_lossy().into_owned())
+fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
+    let size = std::fs::metadata(&path).ok()?.len();
+    Some(PreviewRequest {
+        path: path.to_string_lossy().into_owned(),
+        size,
+    })
 }
 
 #[tauri::command]
-fn get_file_size(path: String) -> Result<u64, String> {
-    let path = validated_file_path(&path)?;
-    std::fs::metadata(&path)
-        .map(|metadata| metadata.len())
-        .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))
+fn get_initial_preview() -> Option<PreviewRequest> {
+    initial_document_path().and_then(preview_request)
 }
 
 #[tauri::command]
-fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String> {
+async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String> {
     let path = validated_file_path(&path)?;
-    let file = std::fs::File::open(&path)
-        .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
-    let limit = if is_text_path(&path) {
-        MAX_TEXT_PREVIEW_BYTES
-    } else {
-        u64::MAX
-    };
-    let mut bytes = Vec::new();
-    file.take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
-    Ok(tauri::ipc::Response::new(bytes))
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)
+            .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+        let limit = if is_text_path(&path) {
+            MAX_TEXT_PREVIEW_BYTES
+        } else {
+            u64::MAX
+        };
+        let expected_size = file
+            .metadata()
+            .map(|metadata| metadata.len().min(limit))
+            .unwrap_or(0);
+        let mut bytes = Vec::with_capacity(usize::try_from(expected_size).unwrap_or(0));
+        file.take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|error| format!("读取任务失败：{error}"))?
 }
 
 pub(crate) fn hide_preview(app: &AppHandle) {
@@ -120,6 +136,9 @@ pub(crate) fn hide_preview(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    let _ = app.emit_to("main", "preview-hidden", ());
+    #[cfg(target_os = "windows")]
+    windows_preview::schedule_low_memory(app.clone());
 }
 
 pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
@@ -127,18 +146,21 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
         return;
     }
 
-    let path = path.to_string_lossy().into_owned();
-    let _ = app.emit_to("main", "preview-file", path);
     #[cfg(target_os = "windows")]
-    windows_preview::show_without_activation(app);
-    #[cfg(not(target_os = "windows"))]
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+    windows_preview::prepare_for_use(app);
+    if let Some(preview) = preview_request(path) {
+        let _ = app.emit_to("main", "preview-file", preview);
     }
 }
 
 #[tauri::command]
 fn show_preview_window(app: AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        windows_preview::prepare_for_use(&app);
+        windows_preview::show_without_activation(&app);
+    }
+    #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
     }
@@ -164,6 +186,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => {
+                #[cfg(target_os = "windows")]
+                windows_preview::prepare_for_use(app);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -189,6 +213,8 @@ pub fn run() {
             if let Some(path) = path {
                 open_preview_path(app, path);
             } else if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                windows_preview::prepare_for_use(app);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -206,8 +232,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_initial_file_path,
-            get_file_size,
+            get_initial_preview,
             read_preview_file,
             show_preview_window,
             hide_preview_window,

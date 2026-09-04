@@ -1,29 +1,20 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { renderDocx } from "./docx-preview-adapter";
-import type { DocumentViewerController, SearchStatus } from "./viewer-types";
+import {
+  acceptedFileExtensions,
+  findDocumentFormat,
+  mimeTypeFor,
+  type DocumentFormat,
+  type DocumentKind,
+  type PreviewSource,
+  type RenderedDocument,
+} from "./document-formats";
+import {
+  imageOverflowMode,
+  MIN_READABLE_IMAGE_HEIGHT,
+  MIN_READABLE_IMAGE_WIDTH,
+} from "./image-layout";
+import type { SearchStatus } from "./viewer-types";
 import "./style.css";
-
-type DocumentKind = "docx" | "xlsx" | "pptx" | "image" | "text";
-
-const imageExtensions = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
-const textExtensions = new Set([
-  "bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css",
-  "csv", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java",
-  "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php",
-  "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "toml", "ts",
-  "swift", "tsv", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
-]);
-
-const imageMimeTypes: Record<string, string> = {
-  avif: "image/avif",
-  bmp: "image/bmp",
-  gif: "image/gif",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  png: "image/png",
-  svg: "image/svg+xml",
-  webp: "image/webp",
-};
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -37,28 +28,28 @@ const emptyOpenButton = $<HTMLButtonElement>("#emptyOpenButton");
 const workspace = $<HTMLElement>("#workspace");
 const loadingState = $<HTMLElement>("#loadingState");
 const documentViewport = $<HTMLElement>("#documentViewport");
-const documentHost = $<HTMLElement>("#documentHost");
+let documentHost = $<HTMLElement>("#documentHost");
 const toast = $<HTMLElement>("#toast");
 const searchInput = $<HTMLInputElement>("#searchInput");
 const searchCount = $<HTMLElement>("#searchCount");
 const previousMatch = $<HTMLButtonElement>("#previousMatch");
 const nextMatch = $<HTMLButtonElement>("#nextMatch");
 
-const officeMimeTypes: Record<"docx" | "xlsx" | "pptx", string> = {
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+type ActiveDocument = {
+  format: DocumentFormat;
+  name: string;
+  pageElements: HTMLElement[];
+  rendered: RenderedDocument;
+  size: number;
 };
 
-let currentFile: File | null = null;
-let currentKind: DocumentKind | null = null;
-let activeController: DocumentViewerController | null = null;
-let lightweightCleanup: (() => void) | null = null;
-let fixedPageLabel: string | null = null;
-let currentDisplayName = "";
-let currentSourceSize = 0;
+type NativePreviewRequest = {
+  path: string;
+  size: number;
+};
+
+let activeDocument: ActiveDocument | null = null;
 let currentPageLabel = "";
-let currentPreviewDimensions: { height: number; width: number } | null = null;
 let lastWindowTitle = "";
 let dragDepth = 0;
 let toastTimer = 0;
@@ -66,8 +57,14 @@ let searchTimer = 0;
 let matchRanges: Range[] = [];
 let currentMatch = -1;
 let pageIndicatorFrame = 0;
-let queuedNativePath: string | null = null;
+let queuedNativeRequest: NativePreviewRequest | null = null;
 let nativeLoadInProgress = false;
+let loadSequence = 0;
+
+const MAX_PREVIEW_WORK_AREA_WIDTH = 0.94;
+const MAX_PREVIEW_WORK_AREA_HEIGHT = 0.92;
+
+fileInput.accept = acceptedFileExtensions();
 
 type HighlightRegistry = {
   clear(): void;
@@ -96,8 +93,8 @@ function compactPageLabel(label: string): string {
 }
 
 function updateWindowTitle(): void {
-  const title = currentDisplayName
-    ? `${currentDisplayName} - ${formatBytes(currentSourceSize)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
+  const title = activeDocument
+    ? `${activeDocument.name} - ${formatBytes(activeDocument.size)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
     : "quickeye";
   if (title === lastWindowTitle) return;
 
@@ -129,7 +126,9 @@ function nextPaint(): Promise<void> {
 }
 
 function measurePreviewDimensions(kind: DocumentKind): { height: number; width: number } | null {
-  if (currentPreviewDimensions) return currentPreviewDimensions;
+  if (activeDocument?.rendered.previewDimensions) {
+    return activeDocument.rendered.previewDimensions;
+  }
 
   const selector = kind === "docx"
     ? "section.docx"
@@ -163,25 +162,39 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
     if (!monitor) return;
 
     const workArea = monitor.workArea.size.toLogical(monitor.scaleFactor);
-    const maximumWidth = Math.max(320, workArea.width * 0.88);
-    const maximumHeight = Math.max(220, workArea.height * 0.84);
+    const maximumWidth = Math.max(320, workArea.width * MAX_PREVIEW_WORK_AREA_WIDTH);
+    const maximumHeight = Math.max(220, workArea.height * MAX_PREVIEW_WORK_AREA_HEIGHT);
     const dimensions = measurePreviewDimensions(kind);
     let width: number;
     let height: number;
 
     if (kind === "image" && dimensions) {
-      const maximumScale = Math.min(
+      const fitScale = Math.min(
         maximumWidth / dimensions.width,
         maximumHeight / dimensions.height,
       );
-      const comfortableScale = Math.max(
-        1,
-        420 / dimensions.width,
-        300 / dimensions.height,
+      const overflowMode = imageOverflowMode(
+        dimensions.width,
+        dimensions.height,
+        maximumWidth,
+        maximumHeight,
       );
-      const scale = Math.min(maximumScale, comfortableScale);
-      width = dimensions.width * scale;
-      height = dimensions.height * scale;
+      if (overflowMode === "scroll-y") {
+        width = Math.min(maximumWidth, MIN_READABLE_IMAGE_WIDTH);
+        height = maximumHeight;
+      } else if (overflowMode === "scroll-x") {
+        width = maximumWidth;
+        height = Math.min(maximumHeight, MIN_READABLE_IMAGE_HEIGHT);
+      } else {
+        const comfortableScale = Math.max(
+          1,
+          MIN_READABLE_IMAGE_WIDTH / dimensions.width,
+          MIN_READABLE_IMAGE_HEIGHT / dimensions.height,
+        );
+        const scale = Math.min(fitScale, comfortableScale);
+        width = dimensions.width * scale;
+        height = dimensions.height * scale;
+      }
     } else if (kind === "docx" && dimensions) {
       width = clamp(
         dimensions.width + 40,
@@ -210,27 +223,10 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
     if (await appWindow.isMaximized()) await appWindow.unmaximize();
     await appWindow.setSize(new LogicalSize(Math.round(width), Math.round(height)));
     await appWindow.center();
+    await nextPaint();
   } catch (error) {
     console.warn("无法自动调整预览窗口", error);
   }
-}
-
-function extensionOf(name: string): string {
-  return name.toLocaleLowerCase().split(".").pop() ?? "";
-}
-
-function getDocumentKind(name: string): DocumentKind | null {
-  const extension = extensionOf(name);
-  if (extension === "docx" || extension === "xlsx" || extension === "pptx") return extension;
-  if (imageExtensions.has(extension)) return "image";
-  if (textExtensions.has(extension)) return "text";
-  return null;
-}
-
-function getMimeType(name: string, kind: DocumentKind): string {
-  if (kind === "image") return imageMimeTypes[extensionOf(name)] ?? "application/octet-stream";
-  if (kind === "text") return "text/plain";
-  return officeMimeTypes[kind];
 }
 
 function normalizeIpcBytes(payload: ArrayBuffer | Uint8Array | number[]): ArrayBuffer {
@@ -257,10 +253,9 @@ function setControlsEnabled(enabled: boolean): void {
   }
 }
 
-function configureControlsForKind(kind: DocumentKind): void {
-  const searchable = kind !== "image";
-  searchInput.disabled = !searchable;
-  if (!searchable) {
+function configureControlsForFormat(format: DocumentFormat): void {
+  searchInput.disabled = !format.searchable;
+  if (!format.searchable) {
     previousMatch.disabled = true;
     nextMatch.disabled = true;
   }
@@ -286,13 +281,13 @@ function clearSearch(): void {
   searchCount.textContent = "";
   previousMatch.disabled = true;
   nextMatch.disabled = true;
-  activeController?.clearSearch();
+  activeDocument?.rendered.controller?.clearSearch();
   highlightRegistry?.delete("docx-search-results");
   highlightRegistry?.delete("docx-search-current");
 }
 
 function openSearch(): void {
-  if (!currentFile || currentKind === "image") return;
+  if (!activeDocument?.format.searchable) return;
   app.classList.add("is-search-open");
   window.requestAnimationFrame(() => {
     searchInput.focus();
@@ -307,13 +302,21 @@ function closeSearch(): void {
   clearSearch();
 }
 
+function destroyRenderedDocument(rendered: RenderedDocument | undefined): void {
+  if (!rendered) return;
+  try {
+    rendered.destroy();
+  } catch (error) {
+    reportFrontendError("dispose preview", error);
+  }
+}
+
 function clearRenderedDocument(): void {
-  activeController?.destroy();
-  activeController = null;
-  lightweightCleanup?.();
-  lightweightCleanup = null;
-  fixedPageLabel = null;
-  currentPreviewDimensions = null;
+  if (pageIndicatorFrame) cancelAnimationFrame(pageIndicatorFrame);
+  pageIndicatorFrame = 0;
+  const previous = activeDocument;
+  activeDocument = null;
+  destroyRenderedDocument(previous?.rendered);
   documentHost.replaceChildren();
   documentHost.className = "document-host";
   documentViewport.className = "document-viewport";
@@ -324,10 +327,6 @@ function clearRenderedDocument(): void {
 function resetViewer(): void {
   closeSearch();
   clearRenderedDocument();
-  currentFile = null;
-  currentKind = null;
-  currentDisplayName = "";
-  currentSourceSize = 0;
   currentPageLabel = "";
   updateWindowTitle();
   workspace.classList.add("is-empty");
@@ -336,23 +335,25 @@ function resetViewer(): void {
 }
 
 function countDocxPages(): number {
-  const sections = documentHost.querySelectorAll("section.docx").length;
+  const sections = activeDocument?.pageElements.length ?? 0;
   if (sections > 0) return sections;
   return documentHost.childElementCount > 0 ? 1 : 0;
 }
 
 function updatePageIndicator(): void {
-  if (activeController) {
-    setPageLabel(activeController.getPageLabel());
+  const controller = activeDocument?.rendered.controller;
+  if (controller) {
+    setPageLabel(controller.getPageLabel());
     return;
   }
 
+  const fixedPageLabel = activeDocument?.rendered.fixedPageLabel;
   if (fixedPageLabel) {
     setPageLabel(fixedPageLabel);
     return;
   }
 
-  const pages = Array.from(documentHost.querySelectorAll<HTMLElement>("section.docx"));
+  const pages = activeDocument?.pageElements ?? [];
   if (pages.length === 0) {
     setPageLabel(documentHost.childElementCount > 0 ? "1/1 页" : "0/0 页");
     return;
@@ -360,17 +361,22 @@ function updatePageIndicator(): void {
 
   const viewport = documentViewport.getBoundingClientRect();
   const viewportCenter = viewport.top + viewport.height / 2;
-  let nearestPage = 0;
-  let nearestDistance = Number.POSITIVE_INFINITY;
-
-  pages.forEach((page, index) => {
-    const rect = page.getBoundingClientRect();
-    const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter);
-    if (distance < nearestDistance) {
-      nearestDistance = distance;
-      nearestPage = index;
-    }
-  });
+  let low = 0;
+  let high = pages.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const bounds = pages[middle].getBoundingClientRect();
+    if (bounds.top + bounds.height / 2 < viewportCenter) low = middle + 1;
+    else high = middle;
+  }
+  let nearestPage = low;
+  if (low > 0) {
+    const current = pages[low].getBoundingClientRect();
+    const previous = pages[low - 1].getBoundingClientRect();
+    const currentDistance = Math.abs(current.top + current.height / 2 - viewportCenter);
+    const previousDistance = Math.abs(previous.top + previous.height / 2 - viewportCenter);
+    if (previousDistance < currentDistance) nearestPage = low - 1;
+  }
 
   setPageLabel(`${nearestPage + 1}/${pages.length} 页`);
 }
@@ -383,116 +389,135 @@ function schedulePageIndicatorUpdate(): void {
   });
 }
 
-async function renderDocxDocument(file: File): Promise<void> {
-  await renderDocx(file, documentHost, documentHost, {
-    className: "docx",
-    inWrapper: true,
-    breakPages: true,
-    ignoreLastRenderedPageBreak: false,
-    renderHeaders: true,
-    renderFooters: true,
-    renderFootnotes: true,
-    renderEndnotes: true,
-    renderComments: false,
-    renderChanges: false,
-    useBase64URL: false,
-    experimental: true,
-    debug: false,
-  });
+function discardStagedDocument(
+  host: HTMLElement | null,
+  rendered: RenderedDocument | null,
+): void {
+  destroyRenderedDocument(rendered ?? undefined);
+  host?.remove();
 }
 
-async function renderDocument(file: File, kind: DocumentKind, sourceSize: number): Promise<void> {
-  if (kind === "docx") {
-    await renderDocxDocument(file);
-    return;
-  }
+function commitStagedDocument(
+  host: HTMLElement,
+  rendered: RenderedDocument,
+  source: PreviewSource,
+  format: DocumentFormat,
+): void {
+  const oldHost = documentHost;
+  const oldDocument = activeDocument;
 
-  if (kind === "image") {
-    const { renderImageViewer } = await import("./image-viewer");
-    const viewer = await renderImageViewer(file, documentHost);
-    lightweightCleanup = viewer.destroy;
-    currentPreviewDimensions = { width: viewer.width, height: viewer.height };
-    fixedPageLabel = "1/1 页";
-    return;
-  }
+  oldHost.removeAttribute("id");
+  host.id = "documentHost";
+  host.classList.remove("is-staging");
+  host.removeAttribute("aria-hidden");
+  oldHost.replaceWith(host);
+  documentHost = host;
 
-  if (kind === "text") {
-    const { renderTextViewer } = await import("./text-viewer");
-    await renderTextViewer(file, documentHost, sourceSize);
-    fixedPageLabel = "1/1 页";
-    return;
-  }
+  activeDocument = {
+    format,
+    name: source.name,
+    pageElements: format.kind === "docx"
+      ? Array.from(host.querySelectorAll<HTMLElement>("section.docx"))
+      : [],
+    rendered,
+    size: source.size,
+  };
+  currentPageLabel = "";
 
-  const buffer = await file.arrayBuffer();
-  if (kind === "xlsx") {
-    const { renderExcelViewer } = await import("./excel-viewer");
-    activeController = await renderExcelViewer(buffer, documentHost, {
-      onSheetChange(index, count) {
-        setPageLabel(`${index + 1}/${count} 页`);
-      },
-    });
-    return;
-  }
+  documentViewport.className = `document-viewport is-${format.kind}`;
+  documentViewport.scrollTop = 0;
+  documentViewport.scrollLeft = 0;
+  workspace.classList.remove("is-empty");
+  workspace.classList.add("has-document");
 
-  const { renderPptxViewer } = await import("./pptx-viewer");
-  activeController = await renderPptxViewer(buffer, documentHost, documentViewport, {
-    onSlideChange(index, count) {
-      setPageLabel(count > 0 ? `${index + 1}/${count} 页` : "0/0 页");
-    },
-  });
+  destroyRenderedDocument(oldDocument?.rendered);
+  oldHost.replaceChildren();
 }
 
-async function loadDocument(file: File, sourceSize = file.size): Promise<void> {
-  const kind = getDocumentKind(file.name);
-  if (!kind) {
-    showToast("暂不支持这种文件格式", "error");
-    return;
-  }
-
+async function loadPreview(
+  format: DocumentFormat,
+  request: number,
+  readSource: () => Promise<PreviewSource>,
+  errorContext: string,
+): Promise<boolean> {
   closeSearch();
   setLoading(true);
-  workspace.classList.remove("is-empty", "has-document");
-  clearRenderedDocument();
-  currentFile = null;
-  currentKind = kind;
-  currentDisplayName = file.name;
-  currentSourceSize = sourceSize;
-  currentPageLabel = "";
-  updateWindowTitle();
-  documentViewport.classList.add(`is-${kind}`);
+  let host: HTMLElement | null = null;
+  let rendered: RenderedDocument | null = null;
 
   try {
-    await renderDocument(file, kind, sourceSize);
-    currentFile = file;
-    workspace.classList.add("has-document");
-    setControlsEnabled(true);
-    configureControlsForKind(kind);
+    const source = await readSource();
+    if (request !== loadSequence) {
+      discardStagedDocument(host, rendered);
+      return false;
+    }
 
-    if (kind === "docx") {
+    host = document.createElement("article");
+    host.className = "document-host is-staging";
+    host.setAttribute("aria-hidden", "true");
+    documentViewport.append(host);
+    rendered = await format.render(source, {
+      host,
+      viewport: documentViewport,
+      isActive: () => host === documentHost,
+      setPageLabel,
+    });
+    if (request !== loadSequence) {
+      discardStagedDocument(host, rendered);
+      return false;
+    }
+
+    commitStagedDocument(host, rendered, source, format);
+    setControlsEnabled(true);
+    configureControlsForFormat(format);
+
+    if (format.kind === "docx") {
       const pages = countDocxPages();
       setPageLabel(pages > 0 ? `1/${pages} 页` : "0/0 页");
     } else {
       updatePageIndicator();
     }
 
-    await resizeWindowForPreview(kind);
+    await resizeWindowForPreview(format.kind);
+    return request === loadSequence && activeDocument?.rendered === rendered;
   } catch (error) {
-    console.error(error);
-    if (isTauri()) {
-      const details = error instanceof Error
-        ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
-        : String(error);
-      void invoke("log_frontend_error", { message: `render ${file.name}: ${details}` });
+    reportFrontendError(errorContext, error);
+    discardStagedDocument(host, rendered);
+    if (!activeDocument) {
+      resetViewer();
+      setPageLabel("打开失败");
+    } else {
+      setControlsEnabled(true);
+      configureControlsForFormat(activeDocument.format);
     }
-    clearRenderedDocument();
-    currentKind = null;
-    setPageLabel("打开失败");
-    workspace.classList.add("is-empty");
-    setControlsEnabled(false);
     showToast("文件打开失败，请确认文件未损坏且格式受支持", "error");
+    return false;
   } finally {
-    setLoading(false);
+    if (request === loadSequence) setLoading(false);
   }
+}
+
+async function loadFile(file: File, request: number): Promise<boolean> {
+  const format = findDocumentFormat(file.name);
+  if (!format) {
+    showToast("暂不支持这种文件格式", "error");
+    return false;
+  }
+
+  return loadPreview(
+    format,
+    request,
+    async () => {
+      const end = Math.min(file.size, format.maxReadBytes ?? file.size);
+      return {
+        bytes: await file.slice(0, end).arrayBuffer(),
+        mimeType: file.type || mimeTypeFor(file.name, format),
+        name: file.name,
+        size: file.size,
+      };
+    },
+    `open ${file.name}`,
+  );
 }
 
 function fileNameFromPath(path: string): string {
@@ -509,37 +534,44 @@ function reportFrontendError(context: string, error: unknown): void {
   void invoke("log_frontend_error", { message: `${context}: ${details}` });
 }
 
-async function loadDocumentFromPath(path: string): Promise<void> {
-  try {
-    const name = fileNameFromPath(path);
-    const kind = getDocumentKind(name);
-    if (!kind) return;
-    const [sourceSize, payload] = await Promise.all([
-      invoke<number>("get_file_size", { path }),
-      invoke<ArrayBuffer | Uint8Array | number[]>("read_preview_file", { path }),
-    ]);
-    const bytes = normalizeIpcBytes(payload);
-    await loadDocument(
-      new File([bytes], name, { type: getMimeType(name, kind) }),
-      sourceSize,
-    );
-    await invoke("show_preview_window");
-  } catch (error) {
-    reportFrontendError(`read ${path}`, error);
-    showToast("无法读取选中的文件", "error");
-  }
+async function loadDocumentFromPath(
+  path: string,
+  sourceSize: number,
+  request: number,
+): Promise<void> {
+  const name = fileNameFromPath(path);
+  const format = findDocumentFormat(name);
+  if (!format) return;
+
+  const loaded = await loadPreview(
+    format,
+    request,
+    async () => {
+      const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("read_preview_file", { path });
+      return {
+        bytes: normalizeIpcBytes(payload),
+        mimeType: mimeTypeFor(name, format),
+        name,
+        size: sourceSize,
+      };
+    },
+    `open ${path}`,
+  );
+  if (loaded) await invoke("show_preview_window");
 }
 
-async function enqueueNativePreview(path: string): Promise<void> {
-  queuedNativePath = path;
+async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void> {
+  queuedNativeRequest = preview;
+  loadSequence += 1;
   if (nativeLoadInProgress) return;
 
   nativeLoadInProgress = true;
   try {
-    while (queuedNativePath) {
-      const nextPath = queuedNativePath;
-      queuedNativePath = null;
-      await loadDocumentFromPath(nextPath);
+    while (queuedNativeRequest) {
+      const nextPreview = queuedNativeRequest;
+      const request = loadSequence;
+      queuedNativeRequest = null;
+      await loadDocumentFromPath(nextPreview.path, nextPreview.size, request);
     }
   } finally {
     nativeLoadInProgress = false;
@@ -550,18 +582,24 @@ async function initializeNativePreview(): Promise<void> {
   if (!isTauri()) return;
 
   const { listen } = await import("@tauri-apps/api/event");
-  await listen<string>("preview-file", (event) => {
+  await listen<NativePreviewRequest>("preview-file", (event) => {
     void enqueueNativePreview(event.payload);
   });
+  await listen("preview-hidden", () => {
+    loadSequence += 1;
+    queuedNativeRequest = null;
+    setLoading(false);
+    resetViewer();
+  });
 
-  const initialPath = await invoke<string | null>("get_initial_file_path");
-  if (initialPath) await enqueueNativePreview(initialPath);
+  const initialPreview = await invoke<NativePreviewRequest | null>("get_initial_preview");
+  if (initialPreview) await enqueueNativePreview(initialPreview);
 }
 
 function collectTextRanges(query: string): Range[] {
   const ranges: Range[] = [];
   const normalized = query.toLocaleLowerCase();
-  const searchRoot = currentKind === "text"
+  const searchRoot = activeDocument?.format.kind === "text"
     ? documentHost.querySelector(".text-viewer code") ?? documentHost
     : documentHost;
   const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_TEXT, {
@@ -635,10 +673,11 @@ function updateCurrentDocxHighlight(scroll = true): void {
 function performSearch(): void {
   clearSearch();
   const query = searchInput.value.trim();
-  if (!query || !currentFile) return;
+  if (!query || !activeDocument) return;
 
-  if (activeController) {
-    applySearchStatus(activeController.search(query));
+  const controller = activeDocument.rendered.controller;
+  if (controller) {
+    applySearchStatus(controller.search(query));
     return;
   }
 
@@ -661,8 +700,9 @@ function performSearch(): void {
 }
 
 function moveMatch(delta: 1 | -1): void {
-  if (activeController) {
-    applySearchStatus(activeController.moveMatch(delta));
+  const controller = activeDocument?.rendered.controller;
+  if (controller) {
+    applySearchStatus(controller.moveMatch(delta));
     return;
   }
   if (matchRanges.length === 0) return;
@@ -673,10 +713,12 @@ function moveMatch(delta: 1 | -1): void {
 emptyOpenButton.addEventListener("click", openPicker);
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void loadDocument(file);
+  if (file) void loadFile(file, ++loadSequence);
 });
 
-documentViewport.addEventListener("scroll", schedulePageIndicatorUpdate, { passive: true });
+documentViewport.addEventListener("scroll", () => {
+  if (activeDocument?.format.kind === "docx") schedulePageIndicatorUpdate();
+}, { passive: true });
 previousMatch.addEventListener("click", () => moveMatch(-1));
 nextMatch.addEventListener("click", () => moveMatch(1));
 
@@ -723,7 +765,7 @@ workspace.addEventListener("drop", (event) => {
   workspace.classList.remove("is-dragging");
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length > 1) showToast("一次只会打开第一个受支持的文件");
-  if (files[0]) void loadDocument(files[0]);
+  if (files[0]) void loadFile(files[0], ++loadSequence);
 });
 
 document.addEventListener("keydown", (event) => {
@@ -740,12 +782,12 @@ document.addEventListener("keydown", (event) => {
   if (key === "o") {
     event.preventDefault();
     openPicker();
-  } else if (key === "f" && currentFile && currentKind !== "image") {
+  } else if (key === "f" && activeDocument?.format.searchable) {
     event.preventDefault();
     openSearch();
-  } else if (key === "p" && currentFile) {
+  } else if (key === "p" && activeDocument) {
     event.preventDefault();
-    if (currentKind === "docx") window.print();
+    if (activeDocument.format.kind === "docx") window.print();
     else showToast("当前格式暂不支持打印");
   }
 });

@@ -2644,11 +2644,13 @@ dependencies = [
 
 [[package]]
 name = "quickeye"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "webview2-com",
  "windows",
 ]
 

@@ -1,4 +1,4 @@
-import { initialImageScale } from "./image-layout";
+import { imageOverflowMode, initialImageScale } from "./image-layout";
 
 export type ImageViewerResult = {
   readonly width: number;
@@ -17,11 +17,14 @@ export async function renderImageViewer(
   frame.className = "image-viewer";
   const canvas = document.createElement("div");
   canvas.className = "image-viewer-canvas";
+  const surface = document.createElement("div");
+  surface.className = "image-viewer-surface";
 
   const image = document.createElement("img");
   image.alt = name;
   image.draggable = false;
-  canvas.append(image);
+  surface.append(image);
+  canvas.append(surface);
   frame.append(canvas);
   host.classList.add("is-image");
   host.append(frame);
@@ -71,9 +74,18 @@ export async function renderImageViewer(
   };
 
   const updateInitialScale = (): void => {
+    const bounds = frame.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const overflowMode = imageOverflowMode(
+      image.naturalWidth,
+      image.naturalHeight,
+      bounds.width,
+      bounds.height,
+    );
+    frame.classList.toggle("is-scroll-y", overflowMode === "scroll-y");
+
     const frameWidth = frame.clientWidth;
     const frameHeight = frame.clientHeight;
-    if (frameWidth <= 0 || frameHeight <= 0) return;
     if (!userZoomed) {
       applyScale(initialImageScale(
         image.naturalWidth,
@@ -122,10 +134,7 @@ export async function renderImageViewer(
     );
     if (Math.abs(nextScale - scale) < 0.00001) return;
 
-    const frameBounds = frame.getBoundingClientRect();
     const imageBounds = image.getBoundingClientRect();
-    const localX = event.clientX - frameBounds.left;
-    const localY = event.clientY - frameBounds.top;
     const sourceX = Math.max(0, Math.min(
       image.naturalWidth,
       (event.clientX - imageBounds.left) / scale,
@@ -137,8 +146,9 @@ export async function renderImageViewer(
 
     userZoomed = true;
     applyScale(nextScale);
-    frame.scrollLeft = image.offsetLeft + sourceX * scale - localX;
-    frame.scrollTop = image.offsetTop + sourceY * scale - localY;
+    const nextImageBounds = image.getBoundingClientRect();
+    frame.scrollLeft += nextImageBounds.left + sourceX * scale - event.clientX;
+    frame.scrollTop += nextImageBounds.top + sourceY * scale - event.clientY;
   };
 
   const finishPan = (event: PointerEvent): void => {

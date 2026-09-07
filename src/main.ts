@@ -28,7 +28,6 @@ const fileInput = $<HTMLInputElement>("#fileInput");
 const app = $<HTMLElement>("#app");
 const emptyOpenButton = $<HTMLButtonElement>("#emptyOpenButton");
 const workspace = $<HTMLElement>("#workspace");
-const loadingState = $<HTMLElement>("#loadingState");
 const documentViewport = $<HTMLElement>("#documentViewport");
 let documentHost = $<HTMLElement>("#documentHost");
 const toast = $<HTMLElement>("#toast");
@@ -68,6 +67,7 @@ let loadSequence = 0;
 
 const MAX_PREVIEW_WORK_AREA_WIDTH = 0.94;
 const MAX_PREVIEW_WORK_AREA_HEIGHT = 0.92;
+const READING_PREVIEW_WIDTH = 850;
 
 fileInput.accept = acceptedFileExtensions();
 
@@ -214,24 +214,29 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
       height = dimensions.height * scale;
     } else if (kind === "audio") {
       width = Math.min(maximumWidth, 620);
-      height = Math.min(maximumHeight, 220);
+      height = Math.min(maximumHeight, 300);
     } else if (kind === "file" || kind === "folder") {
       width = Math.min(maximumWidth, 540);
       height = Math.min(maximumHeight, 360);
+    } else if (kind === "pdf" && dimensions) {
+      const ratio = dimensions.width / dimensions.height;
+      width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
+      height = width / ratio;
+      if (height > maximumHeight) {
+        height = maximumHeight;
+        width = height * ratio;
+      }
     } else if (kind === "pdf") {
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
       height = maximumHeight;
-    } else if (kind === "docx" && dimensions) {
-      width = clamp(
-        dimensions.width + 40,
-        Math.min(420, maximumWidth),
-        maximumWidth,
-      );
-      height = clamp(
-        dimensions.height + 32,
-        Math.min(360, maximumHeight),
-        maximumHeight,
-      );
+    } else if (kind === "docx") {
+      width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
+      height = dimensions
+        ? clamp(dimensions.height + 32, Math.min(360, maximumHeight), maximumHeight)
+        : clamp(workArea.height * 0.76, Math.min(440, maximumHeight), maximumHeight);
+    } else if (kind === "text") {
+      width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
+      height = maximumHeight;
     } else if (kind === "pptx" && dimensions) {
       const ratio = dimensions.width / dimensions.height;
       width = maximumWidth;
@@ -304,13 +309,6 @@ function configureControlsForFormat(format: DocumentFormat): void {
     previousMatch.disabled = true;
     nextMatch.disabled = true;
   }
-}
-
-function setLoading(loading: boolean): void {
-  workspace.classList.toggle("is-loading", loading);
-  loadingState.setAttribute("aria-hidden", String(!loading));
-  emptyOpenButton.disabled = loading;
-  if (loading) setControlsEnabled(false);
 }
 
 function applySearchStatus(status: SearchStatus): void {
@@ -509,7 +507,6 @@ async function loadPreview(
   showFailureToast = true,
 ): Promise<boolean> {
   closeSearch();
-  setLoading(true);
   let host: HTMLElement | null = null;
   let rendered: RenderedDocument | null = null;
   let releaseSource: (() => void) | undefined;
@@ -568,7 +565,6 @@ async function loadPreview(
     return false;
   } finally {
     releaseSource?.();
-    if (request === loadSequence) setLoading(false);
   }
 }
 
@@ -646,11 +642,6 @@ async function loadDocumentFromPath(
     shellIcon: await (shellIconPromise ??= loadShellIcon(path)),
     size: sourceSize,
   });
-
-  // Show a target-bound loading view immediately. Large workbooks can spend seconds parsing;
-  // keeping the window hidden for that entire time makes the Space shortcut look broken.
-  setLoading(true);
-  await invoke("show_preview_window");
 
   const loaded = await loadPreview(
     format,
@@ -730,7 +721,6 @@ async function initializeNativePreview(): Promise<void> {
   await listen("preview-hidden", () => {
     loadSequence += 1;
     queuedNativeRequest = null;
-    setLoading(false);
     resetViewer();
   });
 
@@ -742,7 +732,7 @@ function collectTextRanges(query: string): Range[] {
   const ranges: Range[] = [];
   const normalized = query.toLocaleLowerCase();
   const searchRoot = activeDocument?.format.kind === "text"
-    ? documentHost.querySelector(".text-viewer code") ?? documentHost
+    ? documentHost.querySelector(".text-viewer") ?? documentHost
     : documentHost;
   const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {

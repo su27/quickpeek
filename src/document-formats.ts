@@ -212,8 +212,11 @@ const formats: readonly DocumentFormat[] = [
     searchable: false,
     async render(source, { host }) {
       const { renderPdfViewer } = await import("./pdf-viewer");
-      const viewer = await renderPdfViewer(requireUrl(source), host);
-      return noController({ fixedPageLabel: "" }, viewer.destroy);
+      const viewer = await renderPdfViewer(requireUrl(source), source.path, host);
+      return noController(
+        { fixedPageLabel: "", previewDimensions: viewer.dimensions },
+        viewer.destroy,
+      );
     },
   },
   {
@@ -286,7 +289,13 @@ const formats: readonly DocumentFormat[] = [
     searchable: false,
     async render(source, { host }) {
       const { renderAudioViewer } = await import("./media-viewer");
-      const viewer = await renderAudioViewer(requireUrl(source), source.mimeType, source.name, host);
+      const viewer = await renderAudioViewer(
+        requireUrl(source),
+        source.mimeType,
+        source.name,
+        source.path,
+        host,
+      );
       return noController({ fixedPageLabel: "1/1 页" }, viewer.destroy);
     },
   },
@@ -309,7 +318,7 @@ const formats: readonly DocumentFormat[] = [
       "css", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html",
       "ini", "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md",
       "markdown", "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss",
-      "sh", "sql", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml",
+      "sh", "sql", "srt", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml",
       "yml", "zsh",
     ],
     loadMode: "buffer",

@@ -11,6 +11,8 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
+mod audio_metadata;
+mod pdf_metadata;
 #[cfg(target_os = "windows")]
 mod windows_preview;
 #[cfg(target_os = "windows")]
@@ -31,8 +33,8 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css",
     "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js",
     "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php",
-    "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "svelte", "swift",
-    "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
+    "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "srt", "svelte",
+    "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
 ];
 
 #[derive(Clone, Serialize)]
@@ -42,6 +44,12 @@ struct PreviewRequest {
     modified_at: Option<u64>,
     path: String,
     size: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct PreviewDimensions {
+    height: f64,
+    width: f64,
 }
 
 fn diagnostic_log(message: &str) {
@@ -166,6 +174,42 @@ async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String>
     })
     .await
     .map_err(|error| format!("读取任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn read_pdf_dimensions(path: String) -> Result<Option<PreviewDimensions>, String> {
+    let path = validated_file_path(&path)?;
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Err("文件不是 PDF".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        pdf_metadata::read_dimensions(&path)
+            .map(|dimensions| dimensions.map(|(width, height)| PreviewDimensions { width, height }))
+            .map_err(|error| format!("无法读取 PDF 页面尺寸：{error}"))
+    })
+    .await
+    .map_err(|error| format!("PDF 尺寸读取任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn read_mp3_metadata(path: String) -> Result<Option<audio_metadata::AudioMetadata>, String> {
+    let path = validated_file_path(&path)?;
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
+    {
+        return Err("文件不是 MP3".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        audio_metadata::read(&path).map_err(|error| format!("无法读取 MP3 标签：{error}"))
+    })
+    .await
+    .map_err(|error| format!("MP3 标签读取任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -295,6 +339,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_initial_preview,
             read_preview_file,
+            read_pdf_dimensions,
+            read_mp3_metadata,
             allow_preview_asset,
             #[cfg(target_os = "windows")]
             read_shell_icon,
@@ -324,6 +370,7 @@ mod tests {
             r"C:\archives\files.ZIP",
             r"C:\code\main.RS",
             r"C:\notes\readme.TXT",
+            r"C:\subtitles\episode.SRT",
         ] {
             assert!(is_supported_path(path.as_ref()));
         }

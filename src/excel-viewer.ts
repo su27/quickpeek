@@ -4,6 +4,7 @@ import jsPreviewExcel, {
 } from "@js-preview/excel";
 import "@js-preview/excel/lib/index.css";
 import type { DocumentViewerController, SearchStatus } from "./viewer-types";
+import type { LegacySheetLayout } from "./legacy-excel-layout";
 
 const maximumSearchMatches = 5000;
 
@@ -14,16 +15,24 @@ type ExcelSearchMatch = {
 };
 
 type PreviewCell = {
+  style?: number;
   text?: unknown;
 };
 
 type PreviewRow = {
   cells?: Record<string, PreviewCell>;
+  height?: number;
+};
+
+type PreviewStyle = Record<string, unknown> & {
+  bgcolor?: string;
 };
 
 type PreviewSheet = {
+  cols: Record<string, unknown> & { len?: number };
   name?: string;
   rows: Record<string, PreviewRow | number> & { len?: number };
+  styles?: PreviewStyle[];
 };
 
 type PreviewScrollbar = {
@@ -70,6 +79,94 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+function normalizeSheetDimensions(sheets: PreviewSheet[]): PreviewSheet[] {
+  for (const sheet of sheets) {
+    let lastPopulatedColumn = -1;
+    for (const [rowKey, rowValue] of Object.entries(sheet.rows)) {
+      if (rowKey === "len" || typeof rowValue !== "object" || !rowValue?.cells) continue;
+      for (const columnKey of Object.keys(rowValue.cells)) {
+        const column = Number(columnKey);
+        if (Number.isInteger(column) && column >= 0) {
+          lastPopulatedColumn = Math.max(lastPopulatedColumn, column);
+        }
+      }
+    }
+
+    // Some valid XLSX producers omit <cols> and may even leave worksheet
+    // dimension="A1" while storing cells farther to the right. @js-preview/excel
+    // otherwise turns those sheets into a zero-column grid when minColLength is 0.
+    const declaredLength = Number(sheet.cols.len ?? 0);
+    sheet.cols.len = Math.max(
+      Number.isFinite(declaredLength) ? declaredLength : 0,
+      lastPopulatedColumn + 1,
+      1,
+    );
+  }
+  return sheets;
+}
+
+function applyLegacyLayout(
+  sheets: PreviewSheet[],
+  layout: LegacySheetLayout[] | null,
+): PreviewSheet[] {
+  if (!layout) return sheets;
+
+  for (let sheetIndex = 0; sheetIndex < sheets.length; sheetIndex += 1) {
+    const sheet = sheets[sheetIndex];
+    const source = layout.find((candidate) => candidate.name === sheet.name) ?? layout[sheetIndex];
+    if (!source) continue;
+
+    source.columns.forEach((width, column) => {
+      if (width === null) return;
+      const key = String(column);
+      const current = sheet.cols[key];
+      sheet.cols[key] = {
+        ...(typeof current === "object" && current !== null ? current : {}),
+        width,
+      };
+    });
+
+    source.rows.forEach((height, rowIndex) => {
+      if (height === null) return;
+      const key = String(rowIndex);
+      const current = sheet.rows[key];
+      const row = typeof current === "object" && current !== null
+        ? current
+        : { cells: {} };
+      row.height = height;
+      sheet.rows[key] = row;
+    });
+
+    const styles = (sheet.styles ??= []);
+    const fillStyles = new Map<string, number>();
+    for (const fill of source.fills) {
+      const rowKey = String(fill.row);
+      const columnKey = String(fill.column);
+      const currentRow = sheet.rows[rowKey];
+      const row = typeof currentRow === "object" && currentRow !== null
+        ? currentRow
+        : { cells: {} };
+      const cells = (row.cells ??= {});
+      const cell = (cells[columnKey] ??= { text: "" });
+      const baseStyleIndex = Number.isInteger(cell.style) ? Number(cell.style) : -1;
+      const baseStyle = baseStyleIndex >= 0 ? styles[baseStyleIndex] : undefined;
+      if (baseStyle?.bgcolor?.toUpperCase() === fill.color) continue;
+
+      const styleKey = `${baseStyleIndex}:${fill.color}`;
+      let styleIndex = fillStyles.get(styleKey);
+      if (styleIndex === undefined) {
+        styleIndex = styles.length;
+        styles.push({ ...(baseStyle ?? {}), bgcolor: fill.color });
+        fillStyles.set(styleKey, styleIndex);
+      }
+      cell.style = styleIndex;
+      sheet.rows[rowKey] = row;
+    }
+  }
+
+  return sheets;
+}
+
 export async function renderExcelViewer(
   input: ArrayBuffer,
   host: HTMLElement,
@@ -82,21 +179,34 @@ export async function renderExcelViewer(
   host.classList.add("is-excel");
   host.append(root);
 
+  let previewInput = input;
+  let legacyLayout: LegacySheetLayout[] | null = null;
+  if (options.convertWorkbook) {
+    try {
+      const { prepareLegacyWorkbook } = await import("./legacy-excel-layout");
+      const prepared = await prepareLegacyWorkbook(input);
+      previewInput = prepared.workbook;
+      legacyLayout = prepared.layout;
+    } catch (error) {
+      console.warn("无法保留旧版 Excel 布局，将使用兼容模式打开", error);
+    }
+  }
+
   let workbookData: PreviewSheet[] = [];
   const previewOptions: StyleAwarePreviewOptions = {
     minColLength: 0,
     minRowLength: 0,
     showContextmenu: false,
-    xls: options.convertWorkbook,
+    xls: options.convertWorkbook && legacyLayout === null,
     transformData(sheets) {
-      workbookData = sheets;
-      return sheets;
+      workbookData = normalizeSheetDimensions(applyLegacyLayout(sheets, legacyLayout));
+      return workbookData;
     },
   };
   const previewer = jsPreviewExcel.init(root, previewOptions) as ExcelPreviewInternals;
 
   try {
-    await previewer.preview(input);
+    await previewer.preview(previewInput);
   } catch (error) {
     abortController.abort();
     previewer.destroy();

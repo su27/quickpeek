@@ -1,6 +1,6 @@
 [package]
 name = "quickpeek"
-version = "0.10.1"
+version = "0.10.5"
 description = "一个轻量、离线的 Windows 文件查看器"
 authors = ["su27"]
 edition = "2021"

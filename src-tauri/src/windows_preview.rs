@@ -15,7 +15,14 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use windows::{
     core::{w, Interface, HSTRING, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Graphics::Gdi::{
+            BeginPaint, CreateFontIndirectW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
+            DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject, InvalidateRect, LineTo,
+            MoveToEx, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY,
+            DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
+            HGDIOBJ, LOGFONTW, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+        },
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
@@ -27,7 +34,8 @@ use windows::{
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN,
+                GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
+                TRACKMOUSEEVENT, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN,
                 VK_MENU, VK_RIGHT, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
             },
             Shell::{
@@ -36,15 +44,17 @@ use windows::{
                 ASSOCSTR_FRIENDLYAPPNAME, SIGDN_FILESYSPATH,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, CallWindowProcW, CreateWindowExW, GetClassNameW,
-                GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect,
-                GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer,
-                SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
-                UnhookWindowsHookEx, BS_PUSHBUTTON, GUITHREADINFO, GWLP_WNDPROC, HC_ACTION,
-                HWND_NOTOPMOST, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SM_CXSIZE,
-                SM_CYSIZE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WM_APP, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC,
+                CallNextHookEx, CallWindowProcW, CreateWindowExW, GetClassNameW, GetClientRect,
+                GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect, GetWindowTextW,
+                GetWindowThreadProcessId, KillTimer, LoadCursorW, PostThreadMessageW, SetCursor,
+                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW,
+                ShowWindow, ShowWindowAsync, UnhookWindowsHookEx, BS_OWNERDRAW, GUITHREADINFO,
+                GWLP_WNDPROC, HC_ACTION, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, KBDLLHOOKSTRUCT,
+                LLKHF_INJECTED, MSG, SM_CXSIZE, SM_CYSIZE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WM_APP,
+                WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_PAINT, WM_SETCURSOR, WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC,
                 WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
@@ -67,7 +77,11 @@ static MEMORY_MODE_GENERATION: AtomicU32 = AtomicU32::new(0);
 static OPEN_BUTTON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(36);
+static OPEN_BUTTON_HOVERED: AtomicBool = AtomicBool::new(false);
+static OPEN_BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PREVIEW_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 
 fn set_low_memory_mode(app: &AppHandle, low: bool) {
     let Some(window) = app.get_webview_window("main") else {
@@ -379,18 +393,224 @@ fn original_open_button_proc() -> WNDPROC {
     }
 }
 
+fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
+    COLORREF(u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16))
+}
+
+fn scaled(value: i32, dpi: u32) -> i32 {
+    ((value as i64 * i64::from(dpi.max(96)) + 48) / 96) as i32
+}
+
+unsafe fn create_open_button_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+    let mut descriptor = LOGFONTW {
+        lfHeight: -scaled(12, dpi),
+        lfWeight: 400,
+        lfCharSet: DEFAULT_CHARSET,
+        lfQuality: CLEARTYPE_QUALITY,
+        ..Default::default()
+    };
+    let face_name: Vec<u16> = "Segoe UI Variable Text".encode_utf16().collect();
+    let copy_length = face_name.len().min(descriptor.lfFaceName.len() - 1);
+    descriptor.lfFaceName[..copy_length].copy_from_slice(&face_name[..copy_length]);
+    unsafe { CreateFontIndirectW(&descriptor) }
+}
+
+unsafe fn paint_open_button(window: HWND) {
+    let mut paint = PAINTSTRUCT::default();
+    let device_context = unsafe { BeginPaint(window, &mut paint) };
+    let mut bounds = RECT::default();
+    if unsafe { GetClientRect(window, &mut bounds) }.is_err() {
+        unsafe {
+            let _ = EndPaint(window, &paint);
+        }
+        return;
+    }
+
+    let background = if OPEN_BUTTON_PRESSED.load(Ordering::SeqCst) {
+        rgb(70, 70, 70)
+    } else if OPEN_BUTTON_HOVERED.load(Ordering::SeqCst) {
+        rgb(58, 58, 58)
+    } else {
+        // The Windows 11 dark caption is #202020. Using the same color makes the
+        // popup visually disappear into the native title bar when it is idle.
+        rgb(32, 32, 32)
+    };
+    let brush = unsafe { CreateSolidBrush(background) };
+    unsafe {
+        FillRect(device_context, &bounds, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+
+    let dpi = unsafe { GetDpiForWindow(window) }.max(96);
+    let mut label_buffer = [0_u16; 260];
+    let label_length = unsafe { GetWindowTextW(window, &mut label_buffer) }.max(0) as usize;
+    let has_label = label_length > 0;
+    let icon_size = scaled(12, dpi);
+    let icon_left = if has_label {
+        scaled(9, dpi)
+    } else {
+        ((bounds.right - bounds.left - icon_size) / 2).max(0)
+    };
+    let icon_top = ((bounds.bottom - bounds.top - icon_size) / 2).max(0);
+    let stroke = scaled(1, dpi).max(1);
+    let foreground = if OPEN_BUTTON_HOVERED.load(Ordering::SeqCst) {
+        rgb(210, 214, 220)
+    } else {
+        rgb(168, 173, 181)
+    };
+    let pen = unsafe { CreatePen(PS_SOLID, stroke, foreground) };
+    let old_pen = unsafe { SelectObject(device_context, HGDIOBJ(pen.0)) };
+
+    // A compact external-open glyph. The frame deliberately leaves breathing
+    // room around the arrow so the mark stays clean at fractional display DPI.
+    let left = icon_left;
+    let top = icon_top;
+    let right = left + icon_size;
+    let bottom = top + icon_size;
+    let inset = scaled(1, dpi);
+    let opening = scaled(5, dpi);
+    let arrow_head = scaled(4, dpi);
+    unsafe {
+        let _ = MoveToEx(device_context, left + opening, top + inset, None);
+        let _ = LineTo(device_context, left + inset, top + inset);
+        let _ = LineTo(device_context, left + inset, bottom - inset);
+        let _ = LineTo(device_context, right - inset, bottom - inset);
+        let _ = LineTo(device_context, right - inset, top + opening);
+
+        let _ = MoveToEx(device_context, left + opening, bottom - opening, None);
+        let _ = LineTo(device_context, right - inset, top + inset);
+        let _ = MoveToEx(
+            device_context,
+            right - inset - arrow_head,
+            top + inset,
+            None,
+        );
+        let _ = LineTo(device_context, right - inset, top + inset);
+        let _ = LineTo(device_context, right - inset, top + inset + arrow_head);
+
+        SelectObject(device_context, old_pen);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+
+    if has_label {
+        let font = unsafe { create_open_button_font(dpi) };
+        let font_object = if font.0.is_null() {
+            unsafe { GetStockObject(DEFAULT_GUI_FONT) }
+        } else {
+            HGDIOBJ(font.0)
+        };
+        let old_font = unsafe { SelectObject(device_context, font_object) };
+        unsafe {
+            SetBkMode(device_context, TRANSPARENT);
+            SetTextColor(device_context, foreground);
+        }
+        let mut text_bounds = RECT {
+            left: right + scaled(6, dpi),
+            top: 0,
+            right: bounds.right - scaled(9, dpi),
+            bottom: bounds.bottom,
+        };
+        unsafe {
+            DrawTextW(
+                device_context,
+                &mut label_buffer[..label_length],
+                &mut text_bounds,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            SelectObject(device_context, old_font);
+            if !font.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(font.0));
+            }
+        }
+    }
+
+    unsafe {
+        let _ = EndPaint(window, &paint);
+    }
+}
+
 unsafe extern "system" fn open_button_window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let result =
-        unsafe { CallWindowProcW(original_open_button_proc(), window, message, wparam, lparam) };
-    if message == WM_LBUTTONUP {
-        open_current_preview_with_default_application();
+    match message {
+        WM_PAINT => {
+            unsafe { paint_open_button(window) };
+            return LRESULT(0);
+        }
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_MOUSEMOVE => {
+            if !OPEN_BUTTON_HOVERED.swap(true, Ordering::SeqCst) {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: window,
+                    ..Default::default()
+                };
+                unsafe {
+                    let _ = TrackMouseEvent(&mut tracking);
+                    let _ = InvalidateRect(Some(window), None, false);
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_MOUSELEAVE_MESSAGE => {
+            OPEN_BUTTON_HOVERED.store(false, Ordering::SeqCst);
+            unsafe {
+                let _ = InvalidateRect(Some(window), None, false);
+            }
+            return LRESULT(0);
+        }
+        WM_LBUTTONDOWN => {
+            OPEN_BUTTON_PRESSED.store(true, Ordering::SeqCst);
+            unsafe {
+                SetCapture(window);
+                let _ = InvalidateRect(Some(window), None, false);
+            }
+            return LRESULT(0);
+        }
+        WM_LBUTTONUP => {
+            let was_pressed = OPEN_BUTTON_PRESSED.swap(false, Ordering::SeqCst);
+            unsafe {
+                let _ = ReleaseCapture();
+                let _ = InvalidateRect(Some(window), None, false);
+            }
+            let packed = lparam.0 as u32;
+            let x = (packed as u16 as i16) as i32;
+            let y = ((packed >> 16) as u16 as i16) as i32;
+            let mut bounds = RECT::default();
+            let inside = unsafe { GetClientRect(window, &mut bounds) }.is_ok()
+                && x >= bounds.left
+                && x < bounds.right
+                && y >= bounds.top
+                && y < bounds.bottom;
+            if was_pressed && inside {
+                open_current_preview_with_default_application();
+            }
+            return LRESULT(0);
+        }
+        WM_SETCURSOR => {
+            if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_HAND) } {
+                unsafe {
+                    SetCursor(Some(cursor));
+                }
+            }
+            return LRESULT(1);
+        }
+        WM_SETTEXT => {
+            let result = unsafe {
+                CallWindowProcW(original_open_button_proc(), window, message, wparam, lparam)
+            };
+            unsafe {
+                let _ = InvalidateRect(Some(window), None, false);
+            }
+            return result;
+        }
+        _ => {}
     }
-    result
+    unsafe { CallWindowProcW(original_open_button_proc(), window, message, wparam, lparam) }
 }
 
 fn install_open_button(preview_window: HWND) {
@@ -401,8 +621,8 @@ fn install_open_button(preview_window: HWND) {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("BUTTON"),
-            w!("↗"),
-            WS_POPUP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            w!(""),
+            WS_POPUP | WINDOW_STYLE(BS_OWNERDRAW as u32),
             0,
             0,
             36,
@@ -451,6 +671,12 @@ fn position_open_button_handles(preview_window: HWND, button: HWND) {
     let x = bounds.right - caption_button_width * 3 - horizontal_margin - width;
     let y = bounds.top + ((caption_height - height) / 2).max(1);
     unsafe {
+        let corner_radius = scaled(6, dpi).max(2);
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, corner_radius, corner_radius);
+        if SetWindowRgn(button, Some(region), true) == 0 {
+            let _ = DeleteObject(HGDIOBJ(region.0));
+        }
+        let _ = ShowWindow(button, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(
             button,
             Some(HWND_TOPMOST),
@@ -458,7 +684,7 @@ fn position_open_button_handles(preview_window: HWND, button: HWND) {
             y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
         );
     }
 }
@@ -482,12 +708,13 @@ pub fn set_preview_target(app: &AppHandle, path: &std::path::Path) {
         *target = Some(path.to_path_buf());
     }
     let application = default_application_name(path);
-    let label = application
-        .as_deref()
-        .map(|application| format!("↗  用 {application} 打开"))
-        .unwrap_or_else(|| "↗".to_string());
-    let width = if application.is_some() {
-        (42 + label.encode_utf16().count() as u32 * 8).clamp(112, 230)
+    let label = application.clone().unwrap_or_default();
+    let width = if let Some(application) = application.as_deref() {
+        let estimated_text_width: u32 = application
+            .chars()
+            .map(|character| if character.is_ascii() { 7 } else { 12 })
+            .sum();
+        (42 + estimated_text_width).clamp(74, 220)
     } else {
         36
     };
@@ -582,6 +809,30 @@ pub fn start(app: AppHandle) {
     });
 }
 
+fn raise_preview_window(window_handle: HWND) -> windows::core::Result<()> {
+    unsafe {
+        // The preview must leave Explorer active so arrow-key navigation keeps working.
+        // ShowWindowAsync and SWP_ASYNCWINDOWPOS marshal the first visibility/z-order
+        // transition to the Tauri window thread instead of relying on a cross-thread,
+        // non-activating ShowWindow call during WebView startup.
+        let _ = ShowWindowAsync(window_handle, SW_SHOWNOACTIVATE);
+        SetWindowPos(
+            window_handle,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_ASYNCWINDOWPOS
+                | SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOACTIVATE
+                | SWP_NOOWNERZORDER
+                | SWP_SHOWWINDOW,
+        )
+    }
+}
+
 pub fn show_without_activation(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -593,29 +844,32 @@ pub fn show_without_activation(app: &AppHandle) {
     PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
     PREVIEW_IS_VISIBLE.store(true, Ordering::SeqCst);
     let generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    unsafe {
-        let _ = ShowWindow(window_handle, SW_SHOWNOACTIVATE);
+    // Keep Tauri/tao's own window state in sync with the native z-order. Without
+    // this, a later first-frame window update may restore tao's stale non-topmost state.
+    if let Err(error) = window.set_always_on_top(true) {
+        crate::diagnostic_log(&format!("无法同步预览窗口置顶状态：{error}"));
     }
-    let shown = unsafe {
-        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
-        SetWindowPos(window_handle, Some(HWND_TOPMOST), 0, 0, 0, 0, flags)
-    };
-    if shown.is_err() {
-        let _ = window.show();
+    if let Err(error) = raise_preview_window(window_handle) {
+        crate::diagnostic_log(&format!("无法显示并置顶预览窗口：{error}"));
     }
+    // The caption button is a separately-owned popup and must be the final
+    // z-order operation; raising the owner afterwards can hide it until activation.
     position_open_button(app);
 
     let window_handle_value = window_handle.0 as isize;
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(60));
-        if PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
-            && SHOW_GENERATION.load(Ordering::SeqCst) == generation
-        {
-            let delayed_window = HWND(window_handle_value as *mut c_void);
-            unsafe {
-                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
-                let _ = SetWindowPos(delayed_window, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        // The first WebView composition/frame can finish after the initial native show.
+        // Cover that startup-only race without activating the preview or stealing
+        // Explorer's keyboard focus.
+        for delay in [25_u64, 90, 240] {
+            std::thread::sleep(Duration::from_millis(delay));
+            if !PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+                || SHOW_GENERATION.load(Ordering::SeqCst) != generation
+            {
+                return;
             }
+            let delayed_window = HWND(window_handle_value as *mut c_void);
+            let _ = raise_preview_window(delayed_window);
             let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
             if button != 0 {
                 position_open_button_handles(delayed_window, HWND(button as *mut c_void));
@@ -634,6 +888,8 @@ pub fn clear_topmost(app: &AppHandle) {
         return;
     };
 
+    let _ = window.set_always_on_top(false);
+
     unsafe {
         let _ = SetWindowPos(
             window_handle,
@@ -649,6 +905,8 @@ pub fn clear_topmost(app: &AppHandle) {
 
 pub fn hide_window(app: &AppHandle) {
     clear_topmost(app);
+    OPEN_BUTTON_HOVERED.store(false, Ordering::SeqCst);
+    OPEN_BUTTON_PRESSED.store(false, Ordering::SeqCst);
     let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
     if button != 0 {
         unsafe {

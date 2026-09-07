@@ -1,11 +1,19 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { PreviewDimensions } from "./document-formats";
+
 export type PdfViewerResult = {
+  dimensions: PreviewDimensions | null;
   destroy(): void;
 };
 
 export async function renderPdfViewer(
   url: string,
+  path: string | undefined,
   host: HTMLElement,
 ): Promise<PdfViewerResult> {
+  const dimensionsPromise = path && isTauri()
+    ? invoke<PreviewDimensions | null>("read_pdf_dimensions", { path }).catch(() => null)
+    : Promise.resolve(null);
   const frame = document.createElement("iframe");
   frame.className = "pdf-viewer";
   frame.title = "PDF 文档";
@@ -26,6 +34,7 @@ export async function renderPdfViewer(
   });
 
   return {
+    dimensions: await dimensionsPromise,
     destroy() {
       frame.src = "about:blank";
       frame.remove();

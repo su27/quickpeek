@@ -1,9 +1,53 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PreviewDimensions } from "./document-formats";
 
 type MediaViewerResult = {
   readonly dimensions: PreviewDimensions | null;
   destroy(): void;
 };
+
+type AudioMetadata = {
+  album?: string;
+  artist?: string;
+  composer?: string;
+  genre?: string;
+  title?: string;
+  track?: string;
+  year?: string;
+};
+
+function extensionOf(name: string): string {
+  return name.toLocaleLowerCase().split(".").pop() ?? "";
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const totalSeconds = Math.round(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainder = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+async function loadAudioMetadata(name: string, path: string | undefined): Promise<AudioMetadata | null> {
+  if (!isTauri() || !path || extensionOf(name) !== "mp3") return null;
+  try {
+    return await invoke<AudioMetadata | null>("read_mp3_metadata", { path });
+  } catch (error) {
+    console.warn("无法读取 MP3 标签", error);
+    return null;
+  }
+}
+
+function appendAudioDetail(host: HTMLElement, label: string, value: string | undefined): void {
+  if (!value) return;
+  const detail = document.createElement("span");
+  detail.textContent = `${label}：${value}`;
+  detail.title = detail.textContent;
+  host.append(detail);
+}
 
 function waitForMetadata(media: HTMLMediaElement, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -76,8 +120,10 @@ export async function renderAudioViewer(
   url: string,
   mimeType: string,
   name: string,
+  path: string | undefined,
   host: HTMLElement,
 ): Promise<MediaViewerResult> {
+  const metadataPromise = loadAudioMetadata(name, path);
   const frame = document.createElement("section");
   frame.className = "audio-viewer";
   const glyph = document.createElement("div");
@@ -87,6 +133,10 @@ export async function renderAudioViewer(
   const title = document.createElement("div");
   title.className = "audio-viewer-title";
   title.textContent = name;
+  const artist = document.createElement("div");
+  artist.className = "audio-viewer-artist";
+  const details = document.createElement("div");
+  details.className = "audio-viewer-details";
   const audio = document.createElement("audio");
   audio.autoplay = true;
   audio.controls = true;
@@ -103,6 +153,23 @@ export async function renderAudioViewer(
   try {
     await waitForMetadata(audio, "音频");
     await audio.play();
+    const metadata = await metadataPromise;
+    if (metadata?.title) {
+      title.textContent = metadata.title;
+      title.title = metadata.title;
+    }
+    if (metadata?.artist) {
+      artist.textContent = metadata.artist;
+      artist.title = metadata.artist;
+      title.after(artist);
+    }
+    appendAudioDetail(details, "专辑", metadata?.album);
+    appendAudioDetail(details, "年份", metadata?.year);
+    appendAudioDetail(details, "音轨", metadata?.track);
+    appendAudioDetail(details, "流派", metadata?.genre);
+    appendAudioDetail(details, "作曲", metadata?.composer);
+    appendAudioDetail(details, "时长", formatDuration(audio.duration));
+    if (details.childElementCount > 0) audio.before(details);
   } catch (error) {
     releaseMedia(audio);
     frame.remove();

@@ -4,6 +4,7 @@ use std::{
     fs::OpenOptions,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -14,7 +15,13 @@ use tauri::{
 mod audio_metadata;
 mod pdf_metadata;
 #[cfg(target_os = "windows")]
+mod windows_image_renderer;
+#[cfg(target_os = "windows")]
+mod windows_pdf_renderer;
+#[cfg(target_os = "windows")]
 mod windows_preview;
+#[cfg(target_os = "windows")]
+mod windows_preview_handler;
 #[cfg(target_os = "windows")]
 mod windows_shell_icon;
 
@@ -25,31 +32,183 @@ const BINARY_EXTENSIONS: &[&str] = &[
 ];
 
 const STREAM_EXTENSIONS: &[&str] = &[
-    "aac", "apng", "avif", "bmp", "flac", "gif", "ico", "jfif", "jpeg", "jpg", "m4a", "m4v", "mov",
-    "mp3", "mp4", "ogg", "ogv", "opus", "pdf", "png", "svg", "wav", "webm", "webp",
+    "aac", "apng", "avif", "bmp", "flac", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg",
+    "m4a", "m4v", "mov", "mp3", "mp4", "ogg", "ogv", "opus", "pdf", "png", "svg", "wav", "webm",
+    "webp",
 ];
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs", "css",
-    "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html", "ini", "java", "js",
-    "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md", "markdown", "mjs", "php",
-    "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss", "sh", "sql", "srt", "svelte",
-    "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml", "zsh",
+    "adoc",
+    "ahk",
+    "asm",
+    "asciidoc",
+    "ass",
+    "astro",
+    "awk",
+    "bash",
+    "bat",
+    "bib",
+    "c",
+    "cc",
+    "cfg",
+    "cjs",
+    "clj",
+    "cljs",
+    "cmake",
+    "cmd",
+    "coffee",
+    "conf",
+    "cpp",
+    "cs",
+    "css",
+    "dart",
+    "diff",
+    "dockerfile",
+    "dockerignore",
+    "editorconfig",
+    "elm",
+    "eml",
+    "env",
+    "erl",
+    "ex",
+    "exs",
+    "fish",
+    "fs",
+    "fsx",
+    "gitattributes",
+    "gitignore",
+    "gitmodules",
+    "go",
+    "gql",
+    "gradle",
+    "graphql",
+    "groovy",
+    "h",
+    "handlebars",
+    "hbs",
+    "hpp",
+    "hrl",
+    "hs",
+    "htm",
+    "html",
+    "http",
+    "ics",
+    "ini",
+    "java",
+    "jl",
+    "js",
+    "json",
+    "jsonc",
+    "jsonl",
+    "jsx",
+    "kt",
+    "kts",
+    "less",
+    "lhs",
+    "lock",
+    "log",
+    "lrc",
+    "lua",
+    "m",
+    "makefile",
+    "manifest",
+    "markdown",
+    "md",
+    "mdx",
+    "mjs",
+    "mm",
+    "nim",
+    "njk",
+    "npmrc",
+    "nu",
+    "pas",
+    "patch",
+    "pem",
+    "php",
+    "pl",
+    "pp",
+    "properties",
+    "prop",
+    "proto",
+    "ps1",
+    "py",
+    "pyw",
+    "r",
+    "rb",
+    "reg",
+    "rs",
+    "rst",
+    "s",
+    "scala",
+    "scss",
+    "sh",
+    "sol",
+    "sql",
+    "srt",
+    "ssa",
+    "svelte",
+    "swift",
+    "tex",
+    "tf",
+    "tfvars",
+    "toml",
+    "ts",
+    "tsx",
+    "txt",
+    "vb",
+    "vbs",
+    "vcf",
+    "vtt",
+    "vue",
+    "xml",
+    "yaml",
+    "yml",
+    "zig",
+    "zsh",
+];
+
+const TEXT_FILENAMES: &[&str] = &[
+    "dockerignore",
+    "dockerfile",
+    "editorconfig",
+    "env",
+    "gemfile",
+    "gitattributes",
+    "gitignore",
+    "gitmodules",
+    "license",
+    "makefile",
+    "npmrc",
+    "procfile",
+    "rakefile",
+    "readme",
 ];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewRequest {
+    generation: u32,
     is_directory: bool,
     modified_at: Option<u64>,
     path: String,
     size: u64,
 }
 
+static PREVIEW_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn preview_generation_is_current(generation: u32) -> bool {
+    PREVIEW_GENERATION.load(Ordering::SeqCst) == generation
+}
+
 #[derive(Clone, Serialize)]
 struct PreviewDimensions {
     height: f64,
     width: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct PdfDocumentInfo {
+    pages: Vec<PreviewDimensions>,
 }
 
 fn diagnostic_log(message: &str) {
@@ -79,15 +238,16 @@ fn initial_preview_path() -> Option<PathBuf> {
 }
 
 fn is_supported_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            BINARY_EXTENSIONS
-                .iter()
-                .chain(STREAM_EXTENSIONS)
-                .chain(TEXT_EXTENSIONS)
-                .any(|supported| extension.eq_ignore_ascii_case(supported))
-        })
+    is_text_path(path)
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                BINARY_EXTENSIONS
+                    .iter()
+                    .chain(STREAM_EXTENSIONS)
+                    .any(|supported| extension.eq_ignore_ascii_case(supported))
+            })
 }
 
 fn validated_file_path(raw_path: &str) -> Result<PathBuf, String> {
@@ -102,13 +262,27 @@ fn validated_file_path(raw_path: &str) -> Result<PathBuf, String> {
 }
 
 fn is_text_path(path: &Path) -> bool {
-    path.extension()
+    let known_extension = path
+        .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             TEXT_EXTENSIONS
                 .iter()
                 .any(|text| extension.eq_ignore_ascii_case(text))
-        })
+        });
+    known_extension
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let normalized = name.trim_start_matches('.').to_ascii_lowercase();
+                TEXT_FILENAMES
+                    .iter()
+                    .any(|text| normalized.eq_ignore_ascii_case(text))
+                    || normalized.starts_with("env.")
+                    || normalized.starts_with("dockerfile.")
+                    || normalized.starts_with("makefile.")
+            })
 }
 
 fn is_stream_path(path: &Path) -> bool {
@@ -129,6 +303,7 @@ fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
     Some(PreviewRequest {
+        generation: PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1,
         is_directory: metadata.is_dir(),
         modified_at,
         path: path.to_string_lossy().into_owned(),
@@ -196,6 +371,97 @@ async fn read_pdf_dimensions(path: String) -> Result<Option<PreviewDimensions>, 
 }
 
 #[tauri::command]
+async fn read_pdf_info(path: String) -> Result<PdfDocumentInfo, String> {
+    let path = validated_file_path(&path)?;
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Err("文件不是 PDF".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            windows_pdf_renderer::page_sizes(&path).map(|pages| PdfDocumentInfo {
+                pages: pages
+                    .into_iter()
+                    .map(|(width, height)| PreviewDimensions { width, height })
+                    .collect(),
+            })
+        })
+        .await
+        .map_err(|error| format!("PDF 信息读取任务失败：{error}"))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("当前系统不支持原生 PDF 预览".to_string())
+    }
+}
+
+#[tauri::command]
+async fn render_pdf_page(
+    path: String,
+    page_index: u32,
+    target_width: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let path = validated_file_path(&path)?;
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Err("文件不是 PDF".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            windows_pdf_renderer::render_page(&path, page_index, target_width)
+                .map(tauri::ipc::Response::new)
+        })
+        .await
+        .map_err(|error| format!("PDF 页面渲染任务失败：{error}"))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (path, page_index, target_width);
+        Err("当前系统不支持原生 PDF 预览".to_string())
+    }
+}
+
+#[tauri::command]
+async fn decode_system_image(
+    path: String,
+    max_dimension: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let path = validated_file_path(&path)?;
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
+        })
+    {
+        return Err("文件不是 HEIC/HEIF 图像".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            windows_image_renderer::decode_to_png(&path, max_dimension)
+                .map(tauri::ipc::Response::new)
+        })
+        .await
+        .map_err(|error| format!("HEIC 解码任务失败：{error}"))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (path, max_dimension);
+        Err("当前系统不支持原生 HEIC 预览".to_string())
+    }
+}
+
+#[tauri::command]
 async fn read_mp3_metadata(path: String) -> Result<Option<audio_metadata::AudioMetadata>, String> {
     let path = validated_file_path(&path)?;
     if !path
@@ -239,7 +505,41 @@ async fn read_shell_icon(path: String) -> Result<tauri::ipc::Response, String> {
     .map_err(|error| format!("图标读取任务失败：{error}"))?
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn prepare_system_preview(path: String, generation: u32) -> Result<bool, String> {
+    let path = PathBuf::from(path);
+    if !path.is_file() {
+        return Err("文件不存在或不是普通文件".to_string());
+    }
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("doc"))
+    {
+        return Err("系统预览后备目前仅用于旧版 .doc 文件".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || windows_preview_handler::prepare(path, generation))
+        .await
+        .map_err(|error| format!("系统预览准备任务失败：{error}"))?
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn activate_system_preview(generation: u32) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || windows_preview_handler::activate(generation))
+        .await
+        .map_err(|error| format!("系统预览激活任务失败：{error}"))?
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn unload_system_preview(generation: u32) -> Result<(), String> {
+    windows_preview_handler::unload(Some(generation))
+}
+
 pub(crate) fn hide_preview(app: &AppHandle) {
+    PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst);
     #[cfg(target_os = "windows")]
     windows_preview::hide_window(app);
     #[cfg(not(target_os = "windows"))]
@@ -266,7 +566,10 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
 }
 
 #[tauri::command]
-fn show_preview_window(app: AppHandle) {
+fn show_preview_window(app: AppHandle, generation: Option<u32>) {
+    if generation.is_some_and(|generation| !preview_generation_is_current(generation)) {
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
         windows_preview::prepare_for_use(&app);
@@ -331,8 +634,13 @@ pub fn run() {
                 hide_preview(window.app_handle());
             }
             #[cfg(target_os = "windows")]
-            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+            tauri::WindowEvent::Moved(_) => {
                 windows_preview::position_open_button(window.app_handle());
+            }
+            #[cfg(target_os = "windows")]
+            tauri::WindowEvent::Resized(_) => {
+                windows_preview::position_open_button(window.app_handle());
+                windows_preview_handler::resize();
             }
             _ => {}
         })
@@ -340,10 +648,19 @@ pub fn run() {
             get_initial_preview,
             read_preview_file,
             read_pdf_dimensions,
+            read_pdf_info,
+            render_pdf_page,
+            decode_system_image,
             read_mp3_metadata,
             allow_preview_asset,
             #[cfg(target_os = "windows")]
             read_shell_icon,
+            #[cfg(target_os = "windows")]
+            prepare_system_preview,
+            #[cfg(target_os = "windows")]
+            activate_system_preview,
+            #[cfg(target_os = "windows")]
+            unload_system_preview,
             show_preview_window,
             hide_preview_window,
             log_frontend_error
@@ -371,6 +688,10 @@ mod tests {
             r"C:\code\main.RS",
             r"C:\notes\readme.TXT",
             r"C:\subtitles\episode.SRT",
+            r"C:\subtitles\episode.VTT",
+            r"C:\images\photo.HEIC",
+            r"C:\project\Dockerfile",
+            r"C:\project\.gitignore",
         ] {
             assert!(is_supported_path(path.as_ref()));
         }

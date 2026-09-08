@@ -11,10 +11,12 @@
 - 也可通过双击关联文件或把文件拖到现有预览窗口打开
 - 文件夹使用轻量信息视图预览，不递归读取目录内容
 - 预览 DOCX/Open XML 模板、XLS/XLSX/XLSM/XLSB/ODS/CSV/TSV 和 PPTX/Open XML 演示文稿
-- 使用 WebView2 原生 PDF 查看器预览 PDF
+- 旧版 `.doc` 在系统已注册 Preview Handler 时调用该处理器预览；不可用或加载失败时自动显示文件信息
+- 使用 Windows 系统 PDF 渲染 API 预览 PDF，按最终窗口尺寸绘制首屏
 - 预览 APNG、AVIF、BMP、GIF、ICO、JFIF、JPEG、PNG、SVG 和 WebP 图片
+- HEIC/HEIF 通过 Windows 系统图片解码器预览，需要系统安装相应编解码器
 - 图片支持滚轮/触摸板缩放和拖拽浏览；超长图片保持可读的短轴尺寸并在长轴滚动
-- 预览常见 MP4/WebM/MOV 视频和 MP3/M4A/WAV/FLAC/Ogg 音频；视频自动播放
+- 预览常见 MP4/WebM/MOV 视频和 MP3/M4A/WAV/FLAC/Ogg 音频；音视频自动播放
 - 显示 ZIP 文件目录，但不解压其中的内容
 - 预览常见纯文本和源代码；小于等于 2 MB 的常见代码自动高亮
 - UTF-8、UTF-16 和中文 Windows 常见 GB18030 文本解码
@@ -25,7 +27,7 @@
 - 隐藏 30 秒后 WebView2 自动进入低内存模式；下次预览前恢复正常模式
 - 无预览目标时不显示空窗口；从托盘菜单可完全退出
 
-> 这是只读查看器，不支持旧版 `.doc`、`.ppt`，也不执行宏。由于 Office 文档在浏览器排版能力上的限制，复杂文档的分页、字体和浮动对象可能与 Microsoft Office 略有差异。音视频能否播放取决于系统 WebView2 提供的编解码器。
+> 这是只读查看器，不支持旧版 `.ppt`，也不执行宏。`.doc` 的实际预览能力取决于 Windows 中已安装的预览处理器，QuickPeek 不内置 Word 或 LibreOffice。由于 Office 文档在浏览器排版能力上的限制，复杂文档的分页、字体和浮动对象可能与 Microsoft Office 略有差异。音视频能否播放取决于系统 WebView2 提供的编解码器。
 
 ## 开发运行
 
@@ -48,3 +50,13 @@ npm run tauri build
 ## 增加预览格式
 
 前端格式能力集中注册在 `src/document-formats.ts`。每个格式适配器负责声明扩展名、MIME、是否支持搜索、读取方式和异步渲染函数，并返回统一的可销毁渲染会话。新增会读取内容的格式时还需要同步更新 `src-tauri/src/lib.rs` 的原生内容读取白名单，以及 `src-tauri/tauri.conf.json` 中需要注册到 Windows 的文件关联。
+
+### 旧版 DOC 系统预览
+
+`.doc` 只传递本地文件路径给已注册的 Windows Preview Handler，不引入转换引擎或额外运行时。系统未安装处理器、处理器失败或响应超时时，回退为文件信息。处理器在独立 STA 线程中运行，其自身占用的内存取决于系统安装的软件；QuickPeek 关闭预览时调用 `Unload` 释放会话。第三方处理器仍可能在 QuickPeek 进程内运行，本实现不是独立进程沙箱。
+
+回归检查：`npm run check`、`cargo test --manifest-path src-tauri/Cargo.toml`。另有不显示窗口的可选系统集成测试，需要本机安装 DOC 处理器，并将 `QUICKPEEK_DOC_FIXTURE` 设置为可信 `.doc` 样例路径：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml native_doc_lifecycle -- --ignored
+```

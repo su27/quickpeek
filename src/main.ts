@@ -46,6 +46,7 @@ type ActiveDocument = {
 };
 
 type NativePreviewRequest = {
+  generation: number;
   isDirectory: boolean;
   modifiedAt?: number;
   path: string;
@@ -157,19 +158,24 @@ function measurePreviewDimensions(kind: DocumentKind): { height: number; width: 
     : null;
 }
 
-async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
-  if (!isTauri()) return;
+async function resizeWindowForPreview(
+  kind: DocumentKind,
+  suppliedDimensions?: { height: number; width: number } | null,
+): Promise<{ height: number; width: number } | null> {
+  if (!isTauri()) return null;
 
   try {
-    await nextPaint();
+    if (suppliedDimensions === undefined) await nextPaint();
     const { currentMonitor, getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
     const monitor = await currentMonitor();
-    if (!monitor) return;
+    if (!monitor) return null;
 
     const workArea = monitor.workArea.size.toLogical(monitor.scaleFactor);
     const maximumWidth = Math.max(320, workArea.width * MAX_PREVIEW_WORK_AREA_WIDTH);
     const maximumHeight = Math.max(220, workArea.height * MAX_PREVIEW_WORK_AREA_HEIGHT);
-    const dimensions = measurePreviewDimensions(kind);
+    const dimensions = suppliedDimensions === undefined
+      ? measurePreviewDimensions(kind)
+      : suppliedDimensions;
     let width: number;
     let height: number;
 
@@ -229,7 +235,7 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
     } else if (kind === "pdf") {
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
       height = maximumHeight;
-    } else if (kind === "docx") {
+    } else if (kind === "docx" || kind === "system") {
       width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
       height = dimensions
         ? clamp(dimensions.height + 32, Math.min(360, maximumHeight), maximumHeight)
@@ -251,12 +257,15 @@ async function resizeWindowForPreview(kind: DocumentKind): Promise<void> {
     }
 
     const appWindow = getCurrentWindow();
+    const targetSize = { height: Math.round(height), width: Math.round(width) };
     if (await appWindow.isMaximized()) await appWindow.unmaximize();
-    await appWindow.setSize(new LogicalSize(Math.round(width), Math.round(height)));
+    await appWindow.setSize(new LogicalSize(targetSize.width, targetSize.height));
     await appWindow.center();
     await nextPaint();
+    return targetSize;
   } catch (error) {
     console.warn("无法自动调整预览窗口", error);
+    return null;
   }
 }
 
@@ -519,6 +528,16 @@ async function loadPreview(
       return false;
     }
 
+    const preflightWindow = format.kind === "pdf" || format.kind === "system";
+    let preflightSize: { height: number; width: number } | null = null;
+    if (preflightWindow) {
+      preflightSize = await resizeWindowForPreview(
+        format.kind,
+        format.kind === "pdf" ? source.previewDimensions ?? null : null,
+      );
+      if (request !== loadSequence) return false;
+    }
+
     host = document.createElement("article");
     host.className = "document-host is-staging";
     host.setAttribute("aria-hidden", "true");
@@ -527,6 +546,7 @@ async function loadPreview(
       host,
       viewport: documentViewport,
       isActive: () => host === documentHost,
+      previewWidth: preflightSize?.width,
       setPageLabel,
     });
     rendered = keepSourceAlive(formatRendered, releaseSource);
@@ -536,6 +556,11 @@ async function loadPreview(
       return false;
     }
 
+    await rendered.activate?.();
+    if (request !== loadSequence) {
+      discardStagedDocument(host, rendered);
+      return false;
+    }
     commitStagedDocument(host, rendered, source, format);
     setControlsEnabled(true);
     configureControlsForFormat(format);
@@ -547,7 +572,7 @@ async function loadPreview(
       updatePageIndicator();
     }
 
-    await resizeWindowForPreview(format.kind);
+    if (!preflightWindow) await resizeWindowForPreview(format.kind);
     return request === loadSequence && activeDocument?.rendered === rendered;
   } catch (error) {
     reportFrontendError(errorContext, error);
@@ -569,7 +594,12 @@ async function loadPreview(
 }
 
 async function loadFile(file: File, request: number): Promise<boolean> {
-  const format = findDocumentFormat(file.name);
+  const detectedFormat = findDocumentFormat(file.name);
+  // Browser File objects do not expose a stable Windows path, so a system COM
+  // preview handler cannot open a dragged legacy .doc file safely.
+  const format = detectedFormat.kind === "system"
+    ? fileInfoDocumentFormat(false)
+    : detectedFormat;
 
   return loadPreview(
     format,
@@ -593,6 +623,7 @@ async function loadFile(file: File, request: number): Promise<boolean> {
           mimeType: file.type || mimeTypeFor(file.name, format),
           modifiedAt: file.lastModified,
           name: file.name,
+          previewDimensions: format.kind === "pdf" ? null : undefined,
           size: file.size,
         };
       }
@@ -628,7 +659,7 @@ async function loadDocumentFromPath(
   preview: NativePreviewRequest,
   request: number,
 ): Promise<void> {
-  const { isDirectory, modifiedAt, path, size: sourceSize } = preview;
+  const { generation, isDirectory, modifiedAt, path, size: sourceSize } = preview;
   const name = fileNameFromPath(path);
   const format = findDocumentFormat(name, isDirectory);
   let shellIconPromise: Promise<ShellIcon | undefined> | null = null;
@@ -639,6 +670,7 @@ async function loadDocumentFromPath(
     modifiedAt,
     name,
     path,
+    systemGeneration: generation,
     shellIcon: await (shellIconPromise ??= loadShellIcon(path)),
     size: sourceSize,
   });
@@ -651,7 +683,19 @@ async function loadDocumentFromPath(
         return metadataSource();
       }
       if (format.loadMode === "url") {
-        await invoke("allow_preview_asset", { path });
+        const [, pdfInfo] = await Promise.all([
+          invoke("allow_preview_asset", { path }),
+          format.kind === "pdf"
+            ? invoke<{ pages: Array<{ height: number; width: number }> }>("read_pdf_info", { path })
+                .catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        const previewDimensions = pdfInfo?.pages[0] ?? (
+          format.kind === "pdf"
+            ? await invoke<{ height: number; width: number } | null>("read_pdf_dimensions", { path })
+                .catch(() => null)
+            : undefined
+        );
         return {
           type: "url" as const,
           isDirectory,
@@ -660,6 +704,8 @@ async function loadDocumentFromPath(
           modifiedAt,
           name,
           path,
+          pdfPages: pdfInfo?.pages,
+          previewDimensions,
           size: sourceSize,
         };
       }
@@ -679,7 +725,7 @@ async function loadDocumentFromPath(
     false,
   );
   if (loaded) {
-    await invoke("show_preview_window");
+    await invoke("show_preview_window", { generation });
     return;
   }
 
@@ -690,7 +736,7 @@ async function loadDocumentFromPath(
     metadataSource,
     `show file information for ${path}`,
   );
-  if (fallbackLoaded) await invoke("show_preview_window");
+  if (fallbackLoaded) await invoke("show_preview_window", { generation });
 }
 
 async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void> {

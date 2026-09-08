@@ -800,6 +800,7 @@ pub fn start(app: AppHandle) {
         if let Ok(window_handle) = window.hwnd() {
             PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
             install_open_button(window_handle);
+            crate::windows_preview_handler::start(window_handle);
         }
     }
     std::thread::spawn(move || {
@@ -855,6 +856,7 @@ pub fn show_without_activation(app: &AppHandle) {
     // The caption button is a separately-owned popup and must be the final
     // z-order operation; raising the owner afterwards can hide it until activation.
     position_open_button(app);
+    crate::windows_preview_handler::resize();
 
     let window_handle_value = window_handle.0 as isize;
     std::thread::spawn(move || {
@@ -912,6 +914,9 @@ pub fn hide_window(app: &AppHandle) {
         unsafe {
             let _ = ShowWindow(HWND(button as *mut c_void), SW_HIDE);
         }
+    }
+    if let Err(error) = crate::windows_preview_handler::unload(None) {
+        crate::diagnostic_log(&format!("系统预览处理器卸载请求失败：{error}"));
     }
     let Some(window) = app.get_webview_window("main") else {
         return;

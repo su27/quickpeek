@@ -9,6 +9,7 @@ export type DocumentKind =
   | "image"
   | "pdf"
   | "pptx"
+  | "system"
   | "text"
   | "video"
   | "xlsx";
@@ -30,6 +31,9 @@ type PreviewMetadata = {
   modifiedAt?: number;
   name: string;
   path?: string;
+  systemGeneration?: number;
+  pdfPages?: PreviewDimensions[];
+  previewDimensions?: PreviewDimensions | null;
   shellIcon?: ShellIcon;
   size: number;
   release?: () => void;
@@ -45,12 +49,14 @@ export type RenderedDocument = {
   controller: DocumentViewerController | null;
   fixedPageLabel: string | null;
   previewDimensions: PreviewDimensions | null;
+  activate?(): Promise<void>;
   destroy(): void;
 };
 
 export type RenderContext = {
   host: HTMLElement;
   isActive(): boolean;
+  previewWidth?: number;
   setPageLabel(label: string): void;
   viewport: HTMLElement;
 };
@@ -117,6 +123,33 @@ const folderFormat: DocumentFormat = {
 };
 
 const formats: readonly DocumentFormat[] = [
+  {
+    kind: "system",
+    extensions: ["doc"],
+    loadMode: "metadata",
+    mimeType: "application/msword",
+    searchable: false,
+    async render(source, { host }) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const generation = source.systemGeneration;
+      if (!source.path || generation === undefined) throw new Error("系统预览需要本地文件路径");
+      if (!await invoke<boolean>("prepare_system_preview", { path: source.path, generation })) {
+        throw new Error("系统预览处理器不可用或预览已取消");
+      }
+      host.classList.add("is-system-preview");
+      return {
+        ...noController({ fixedPageLabel: "" }),
+        async activate() {
+          if (!await invoke<boolean>("activate_system_preview", { generation })) {
+            throw new Error("系统预览未能激活或已取消");
+          }
+        },
+        destroy() {
+          void invoke("unload_system_preview", { generation }).catch(console.warn);
+        },
+      };
+    },
+  },
   {
     kind: "docx",
     extensions: ["docm", "docx", "dotm", "dotx"],
@@ -210,24 +243,36 @@ const formats: readonly DocumentFormat[] = [
     loadMode: "url",
     mimeType: "application/pdf",
     searchable: false,
-    async render(source, { host }) {
+    async render(source, { host, isActive, previewWidth, setPageLabel }) {
       const { renderPdfViewer } = await import("./pdf-viewer");
-      const viewer = await renderPdfViewer(requireUrl(source), source.path, host);
+      const viewer = await renderPdfViewer(
+        requireUrl(source),
+        source.path,
+        source.pdfPages,
+        source.previewDimensions ?? null,
+        previewWidth,
+        host,
+        (page, count) => {
+          if (isActive()) setPageLabel(`${page}/${count} 页`);
+        },
+      );
       return noController(
-        { fixedPageLabel: "", previewDimensions: viewer.dimensions },
+        { fixedPageLabel: viewer.pageCount > 0 ? `1/${viewer.pageCount} 页` : "", previewDimensions: viewer.dimensions },
         viewer.destroy,
       );
     },
   },
   {
     kind: "image",
-    extensions: ["apng", "avif", "bmp", "gif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "webp"],
+    extensions: ["apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "webp"],
     loadMode: "url",
     mimeType: {
       apng: "image/apng",
       avif: "image/avif",
       bmp: "image/bmp",
       gif: "image/gif",
+      heic: "image/heic",
+      heif: "image/heif",
       ico: "image/x-icon",
       jfif: "image/jpeg",
       jpeg: "image/jpeg",
@@ -239,7 +284,7 @@ const formats: readonly DocumentFormat[] = [
     searchable: false,
     async render(source, { host }) {
       const { renderImageViewer } = await import("./image-viewer");
-      const viewer = await renderImageViewer(requireUrl(source), source.name, host);
+      const viewer = await renderImageViewer(requireUrl(source), source.name, host, source.path);
       return noController(
         {
           fixedPageLabel: "1/1 页",
@@ -314,12 +359,18 @@ const formats: readonly DocumentFormat[] = [
   {
     kind: "text",
     extensions: [
-      "bash", "bat", "c", "cc", "cfg", "cjs", "clj", "cljs", "cmd", "conf", "cpp", "cs",
-      "css", "dart", "env", "erl", "ex", "exs", "go", "h", "hpp", "hrl", "htm", "html",
-      "ini", "java", "js", "json", "jsonc", "jsx", "kt", "kts", "less", "log", "lua", "md",
-      "markdown", "mjs", "php", "pl", "ps1", "py", "pyw", "r", "rb", "rs", "scala", "scss",
-      "sh", "sql", "srt", "svelte", "swift", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml",
-      "yml", "zsh",
+      "adoc", "ahk", "asm", "asciidoc", "ass", "astro", "awk", "bash", "bat", "bib", "c",
+      "cc", "cfg", "cjs", "clj", "cljs", "cmake", "cmd", "coffee", "conf", "cpp", "cs", "css",
+      "dart", "diff", "dockerfile", "dockerignore", "editorconfig", "elm", "eml", "env", "erl",
+      "ex", "exs", "fish", "fs", "fsx", "gitattributes", "gitignore", "gitmodules", "go", "gql",
+      "gradle", "graphql", "groovy", "h", "handlebars", "hbs", "hpp", "hrl", "hs", "htm", "html",
+      "http", "ics", "ini", "java", "jl", "js", "json", "jsonc", "jsonl", "jsx", "kt", "kts",
+      "less", "lhs", "lock", "log", "lrc", "lua", "m", "makefile", "manifest", "markdown", "md",
+      "mdx", "mjs", "mm", "nim", "njk", "npmrc", "nu", "pas", "patch", "pem", "php", "pl",
+      "pp", "procfile", "properties", "prop", "proto", "ps1", "py", "pyw", "r", "rakefile", "rb",
+      "readme", "reg", "rs", "rst", "s", "scala", "scss", "sh", "sol", "sql", "srt", "ssa",
+      "svelte", "swift", "tex", "tf", "tfvars", "toml", "ts", "tsx", "txt", "vb", "vbs", "vcf",
+      "vtt", "vue", "xml", "yaml", "yml", "zig", "zsh", "gemfile", "license",
     ],
     loadMode: "buffer",
     mimeType: "text/plain",
@@ -344,6 +395,15 @@ export function extensionOf(name: string): string {
 
 export function findDocumentFormat(name: string, isDirectory = false): DocumentFormat {
   if (isDirectory) return folderFormat;
+  const lowerName = name.toLocaleLowerCase();
+  const normalizedName = lowerName.startsWith(".") ? lowerName.slice(1) : lowerName;
+  if (
+    normalizedName.startsWith("env.")
+    || normalizedName.startsWith("dockerfile.")
+    || normalizedName.startsWith("makefile.")
+  ) {
+    return formats.find((format) => format.kind === "text") ?? unknownFormat;
+  }
   return formatsByExtension.get(extensionOf(name)) ?? unknownFormat;
 }
 

@@ -1,20 +1,56 @@
 import hljs from "highlight.js/lib/core";
+import autohotkey from "highlight.js/lib/languages/autohotkey";
+import awk from "highlight.js/lib/languages/awk";
 import bash from "highlight.js/lib/languages/bash";
 import c from "highlight.js/lib/languages/c";
+import clojure from "highlight.js/lib/languages/clojure";
+import cmake from "highlight.js/lib/languages/cmake";
+import coffeescript from "highlight.js/lib/languages/coffeescript";
 import cpp from "highlight.js/lib/languages/cpp";
 import csharp from "highlight.js/lib/languages/csharp";
 import css from "highlight.js/lib/languages/css";
+import dart from "highlight.js/lib/languages/dart";
+import delphi from "highlight.js/lib/languages/delphi";
+import diff from "highlight.js/lib/languages/diff";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import elixir from "highlight.js/lib/languages/elixir";
+import erlang from "highlight.js/lib/languages/erlang";
+import elm from "highlight.js/lib/languages/elm";
+import fsharp from "highlight.js/lib/languages/fsharp";
 import go from "highlight.js/lib/languages/go";
+import gradle from "highlight.js/lib/languages/gradle";
+import graphql from "highlight.js/lib/languages/graphql";
+import groovy from "highlight.js/lib/languages/groovy";
+import haskell from "highlight.js/lib/languages/haskell";
 import ini from "highlight.js/lib/languages/ini";
 import java from "highlight.js/lib/languages/java";
 import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
+import julia from "highlight.js/lib/languages/julia";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import latex from "highlight.js/lib/languages/latex";
+import less from "highlight.js/lib/languages/less";
+import lua from "highlight.js/lib/languages/lua";
+import makefile from "highlight.js/lib/languages/makefile";
 import markdown from "highlight.js/lib/languages/markdown";
+import nim from "highlight.js/lib/languages/nim";
+import objectivec from "highlight.js/lib/languages/objectivec";
+import perl from "highlight.js/lib/languages/perl";
+import php from "highlight.js/lib/languages/php";
 import powershell from "highlight.js/lib/languages/powershell";
+import properties from "highlight.js/lib/languages/properties";
+import protobuf from "highlight.js/lib/languages/protobuf";
 import python from "highlight.js/lib/languages/python";
+import r from "highlight.js/lib/languages/r";
+import ruby from "highlight.js/lib/languages/ruby";
 import rust from "highlight.js/lib/languages/rust";
+import scala from "highlight.js/lib/languages/scala";
+import scss from "highlight.js/lib/languages/scss";
 import sql from "highlight.js/lib/languages/sql";
+import swift from "highlight.js/lib/languages/swift";
 import typescript from "highlight.js/lib/languages/typescript";
+import vbnet from "highlight.js/lib/languages/vbnet";
+import x86asm from "highlight.js/lib/languages/x86asm";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 
@@ -22,36 +58,102 @@ const MAX_TEXT_BYTES = 20 * 1024 * 1024;
 const MAX_HIGHLIGHT_BYTES = 2 * 1024 * 1024;
 
 const languageByExtension: Record<string, string> = {
+  ahk: "autohotkey",
+  asm: "x86asm",
+  astro: "xml",
+  awk: "awk",
   bash: "bash",
+  bib: "latex",
   c: "c",
   cc: "cpp",
   cfg: "ini",
   cjs: "javascript",
+  clj: "clojure",
+  cljs: "clojure",
+  cmake: "cmake",
+  coffee: "coffeescript",
   conf: "ini",
   cpp: "cpp",
   cs: "csharp",
   css: "css",
+  dart: "dart",
+  diff: "diff",
+  dockerfile: "dockerfile",
+  dockerignore: "properties",
+  editorconfig: "ini",
+  elm: "elm",
+  erl: "erlang",
+  ex: "elixir",
+  exs: "elixir",
+  fish: "bash",
+  fs: "fsharp",
+  fsx: "fsharp",
+  gitattributes: "properties",
+  gitignore: "properties",
+  gitmodules: "ini",
   go: "go",
+  gql: "graphql",
+  gradle: "gradle",
+  graphql: "graphql",
+  groovy: "groovy",
   h: "c",
+  handlebars: "xml",
+  hbs: "xml",
   hpp: "cpp",
+  hs: "haskell",
   htm: "xml",
   html: "xml",
   ini: "ini",
   java: "java",
+  jl: "julia",
   js: "javascript",
   json: "json",
   jsonc: "json",
+  jsonl: "json",
   jsx: "javascript",
+  kt: "kotlin",
+  kts: "kotlin",
+  less: "less",
+  lhs: "haskell",
+  lua: "lua",
+  m: "objectivec",
+  makefile: "makefile",
   md: "markdown",
+  mdx: "markdown",
   mjs: "javascript",
+  mm: "objectivec",
+  nim: "nim",
+  njk: "xml",
+  npmrc: "properties",
+  pas: "delphi",
+  patch: "diff",
+  php: "php",
+  pl: "perl",
+  pp: "delphi",
   ps1: "powershell",
+  properties: "properties",
+  prop: "properties",
+  proto: "protobuf",
   py: "python",
   pyw: "python",
+  r: "r",
+  rb: "ruby",
+  reg: "ini",
   rs: "rust",
+  s: "x86asm",
+  scala: "scala",
+  scss: "scss",
   sh: "bash",
   sql: "sql",
+  svelte: "xml",
+  swift: "swift",
+  tex: "latex",
+  toml: "ini",
   ts: "typescript",
   tsx: "typescript",
+  vb: "vbnet",
+  vbs: "vbnet",
+  vue: "xml",
   xml: "xml",
   yaml: "yaml",
   yml: "yaml",
@@ -59,22 +161,58 @@ const languageByExtension: Record<string, string> = {
 };
 
 [
+  ["autohotkey", autohotkey],
+  ["awk", awk],
   ["bash", bash],
   ["c", c],
+  ["clojure", clojure],
+  ["cmake", cmake],
+  ["coffeescript", coffeescript],
   ["cpp", cpp],
   ["csharp", csharp],
   ["css", css],
+  ["dart", dart],
+  ["delphi", delphi],
+  ["diff", diff],
+  ["dockerfile", dockerfile],
+  ["elixir", elixir],
+  ["elm", elm],
+  ["erlang", erlang],
+  ["fsharp", fsharp],
   ["go", go],
+  ["gradle", gradle],
+  ["graphql", graphql],
+  ["groovy", groovy],
+  ["haskell", haskell],
   ["ini", ini],
   ["java", java],
   ["javascript", javascript],
   ["json", json],
+  ["julia", julia],
+  ["kotlin", kotlin],
+  ["latex", latex],
+  ["less", less],
+  ["lua", lua],
+  ["makefile", makefile],
   ["markdown", markdown],
+  ["nim", nim],
+  ["objectivec", objectivec],
+  ["perl", perl],
+  ["php", php],
   ["powershell", powershell],
+  ["properties", properties],
+  ["protobuf", protobuf],
   ["python", python],
+  ["r", r],
+  ["ruby", ruby],
   ["rust", rust],
+  ["scala", scala],
+  ["scss", scss],
   ["sql", sql],
+  ["swift", swift],
   ["typescript", typescript],
+  ["vbnet", vbnet],
+  ["x86asm", x86asm],
   ["xml", xml],
   ["yaml", yaml],
 ].forEach(([name, grammar]) => hljs.registerLanguage(name as string, grammar as typeof bash));
@@ -98,6 +236,69 @@ type InlineMatch = {
 
 function extensionOf(name: string): string {
   return name.toLocaleLowerCase().split(".").pop() ?? "";
+}
+
+function languageForFile(name: string, extension: string): string | undefined {
+  const lowerName = name.toLocaleLowerCase();
+  if (lowerName === "cmakelists.txt") return "cmake";
+  if (lowerName.startsWith(".env")) return "properties";
+  if (lowerName === "cargo.lock") return "ini";
+  if (lowerName === "makefile" || lowerName === "gemfile" || lowerName === "rakefile") {
+    return lowerName === "makefile" ? "makefile" : "ruby";
+  }
+  if (lowerName === "dockerfile" || lowerName.startsWith("dockerfile.")) return "dockerfile";
+  return languageByExtension[extension];
+}
+
+const SUBTITLE_EXTENSIONS = new Set(["ass", "lrc", "srt", "ssa", "vtt"]);
+
+function appendSubtitleToken(parent: HTMLElement, value: string, className: string): void {
+  const token = document.createElement("span");
+  token.className = className;
+  token.textContent = value;
+  parent.append(token);
+}
+
+function appendSubtitleLine(parent: HTMLElement, line: string, extension: string): void {
+  if (/^\s*\d+\s*$/.test(line) && (extension === "srt" || extension === "vtt")) {
+    appendSubtitleToken(parent, line, "subtitle-index");
+    return;
+  }
+  if (/^WEBVTT(?:\s|$)/i.test(line) || /^\[[^\]]+\]\s*$/.test(line)) {
+    appendSubtitleToken(parent, line, "subtitle-section");
+    return;
+  }
+
+  const tokenPattern = /(\d{1,2}:\d{2}:\d{2}[,.]\d{2,3}|\d{1,2}:\d{2}[.:]\d{2,3}|-->|\{\\[^}]+\}|\[[^\]\r\n]+\]|^(?:Dialogue|Comment|Style|Format|Title|ScriptType):)/gi;
+  let cursor = 0;
+  for (const match of line.matchAll(tokenPattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) parent.append(document.createTextNode(line.slice(cursor, index)));
+    const value = match[0];
+    const className = value === "-->"
+      ? "subtitle-arrow"
+      : /^\d/.test(value) || /^\[\d/.test(value)
+        ? "subtitle-time"
+        : value.startsWith("{\\")
+          ? "subtitle-tag"
+          : "subtitle-label";
+    appendSubtitleToken(parent, value, className);
+    cursor = index + value.length;
+  }
+  if (cursor < line.length) parent.append(document.createTextNode(line.slice(cursor)));
+}
+
+function renderSubtitle(text: string, extension: string): HTMLPreElement {
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.className = `subtitle-code language-${extension}`;
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  lines.forEach((line, index) => {
+    appendSubtitleLine(code, line, extension);
+    if (index < lines.length - 1) code.append(document.createTextNode("\n"));
+  });
+  pre.append(code);
+  return pre;
 }
 
 function looksLikeUtf16(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
@@ -465,19 +666,20 @@ export async function renderTextViewer(
   const { encoding, text } = decodeText(bytes);
   const extension = extensionOf(name);
   const isMarkdown = extension === "md" || extension === "markdown";
-  const language = languageByExtension[extension];
-  const highlighted = !isMarkdown && Boolean(language) && sourceSize <= MAX_HIGHLIGHT_BYTES;
+  const isSubtitle = SUBTITLE_EXTENSIONS.has(extension);
+  const language = languageForFile(name, extension);
+  const highlighted = !isMarkdown && (isSubtitle || Boolean(language)) && sourceSize <= MAX_HIGHLIGHT_BYTES;
   const renderFormattedMarkdown = isMarkdown && sourceSize <= MAX_HIGHLIGHT_BYTES;
 
   const viewer = document.createElement("section");
-  viewer.className = `text-viewer ${renderFormattedMarkdown ? "is-markdown" : language && !isMarkdown ? "is-code" : "is-plain"}`;
+  viewer.className = `text-viewer ${renderFormattedMarkdown ? "is-markdown" : isSubtitle ? "is-code is-subtitle" : language && !isMarkdown ? "is-code" : "is-plain"}`;
 
   if (truncated) {
     const notice = document.createElement("div");
     notice.className = "text-viewer-notice";
     notice.textContent = "文件较大，仅显示前 20 MB";
     viewer.append(notice);
-  } else if ((language || isMarkdown) && !highlighted && !renderFormattedMarkdown) {
+  } else if ((language || isMarkdown || isSubtitle) && !highlighted && !renderFormattedMarkdown) {
     const notice = document.createElement("div");
     notice.className = "text-viewer-notice";
     notice.textContent = isMarkdown
@@ -488,6 +690,8 @@ export async function renderTextViewer(
 
   if (renderFormattedMarkdown) {
     viewer.append(renderMarkdown(text));
+  } else if (isSubtitle && highlighted) {
+    viewer.append(renderSubtitle(text, extension));
   } else {
     const pre = document.createElement("pre");
     const code = document.createElement("code");

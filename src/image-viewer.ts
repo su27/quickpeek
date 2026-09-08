@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { imageOverflowMode, initialImageScale } from "./image-layout";
 
 export type ImageViewerResult = {
@@ -10,6 +11,7 @@ export async function renderImageViewer(
   url: string,
   name: string,
   host: HTMLElement,
+  path?: string,
 ): Promise<ImageViewerResult> {
   const frame = document.createElement("div");
   frame.className = "image-viewer";
@@ -27,11 +29,24 @@ export async function renderImageViewer(
   host.classList.add("is-image");
   host.append(frame);
 
+  let decodedUrl: string | null = null;
+  const extension = name.toLocaleLowerCase().split(".").pop() ?? "";
+  if (path && isTauri() && (extension === "heic" || extension === "heif")) {
+    const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("decode_system_image", {
+      maxDimension: 4096,
+      path,
+    });
+    const source = payload instanceof ArrayBuffer
+      ? payload
+      : new Uint8Array(payload instanceof Uint8Array ? payload : payload);
+    decodedUrl = URL.createObjectURL(new Blob([source], { type: "image/png" }));
+  }
+
   try {
     await new Promise<void>((resolve, reject) => {
       image.addEventListener("load", () => resolve(), { once: true });
       image.addEventListener("error", () => reject(new Error("图片解码失败")), { once: true });
-      image.src = url;
+      image.src = decodedUrl ?? url;
     });
     if (typeof image.decode === "function") {
       try {
@@ -41,6 +56,7 @@ export async function renderImageViewer(
       }
     }
   } catch (error) {
+    if (decodedUrl) URL.revokeObjectURL(decodedUrl);
     frame.remove();
     throw error;
   }
@@ -193,6 +209,7 @@ export async function renderImageViewer(
       frame.removeEventListener("pointerup", finishPan);
       frame.removeEventListener("pointercancel", finishPan);
       image.removeAttribute("src");
+      if (decodedUrl) URL.revokeObjectURL(decodedUrl);
       frame.remove();
     },
   };

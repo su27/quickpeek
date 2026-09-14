@@ -9,9 +9,6 @@ use std::{
 };
 
 use tauri::{AppHandle, Manager};
-use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
-};
 use windows::{
     core::{w, Interface, HSTRING, PCWSTR, PWSTR},
     Win32::{
@@ -32,6 +29,7 @@ use windows::{
             Variant::VARIANT,
         },
         UI::{
+            Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -41,21 +39,24 @@ use windows::{
             Shell::{
                 AssocQueryStringW, IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2,
                 SID_STopLevelBrowser, ShellExecuteW, ShellWindows, ASSOCF_INIT_IGNOREUNKNOWN,
-                ASSOCSTR_FRIENDLYAPPNAME, SIGDN_FILESYSPATH,
+                ASSOCSTR_FRIENDLYAPPNAME, SIGDN_FILESYSPATH, SWC_DESKTOP, SWFO_NEEDDISPATCH,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, CallWindowProcW, CreateWindowExW, GetClassNameW, GetClientRect,
-                GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect, GetWindowTextW,
-                GetWindowThreadProcessId, KillTimer, LoadCursorW, PostThreadMessageW, SetCursor,
-                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW,
-                ShowWindow, ShowWindowAsync, UnhookWindowsHookEx, BS_OWNERDRAW, GUITHREADINFO,
-                GWLP_WNDPROC, HC_ACTION, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, KBDLLHOOKSTRUCT,
-                LLKHF_INJECTED, MSG, SM_CXSIZE, SM_CYSIZE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WM_APP,
-                WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_PAINT, WM_SETCURSOR, WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+                CallNextHookEx, CallWindowProcW, CreateWindowExW, GetAncestor, GetClassNameW,
+                GetClientRect, GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect,
+                GetWindowTextW, GetWindowThreadProcessId, KillTimer, LoadCursorW,
+                PostThreadMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
+                SetWindowTextW, SetWindowsHookExW, ShowWindow, ShowWindowAsync,
+                UnhookWindowsHookEx, BS_OWNERDRAW, EVENT_OBJECT_FOCUS,
+                EVENT_OBJECT_SELECTIONWITHIN, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HC_ACTION,
+                HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
+                SM_CXSIZE, SM_CYSIZE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+                SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
+                WINEVENT_SKIPOWNPROCESS, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETTEXT,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WS_POPUP,
             },
         },
     },
@@ -65,7 +66,6 @@ const WM_QUICKPEEK_OPEN: u32 = WM_APP + 0x51;
 const WM_QUICKPEEK_REFRESH: u32 = WM_APP + 0x52;
 const WM_QUICKPEEK_HIDE: u32 = WM_APP + 0x53;
 const REFRESH_TIMER_ID: usize = 0x5145;
-const LOW_MEMORY_DELAY: Duration = Duration::from_secs(30);
 
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static SPACE_IS_DOWN: AtomicBool = AtomicBool::new(false);
@@ -73,7 +73,6 @@ static ESCAPE_IS_DOWN: AtomicBool = AtomicBool::new(false);
 static PREVIEW_IS_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PREVIEW_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static SHOW_GENERATION: AtomicU32 = AtomicU32::new(0);
-static MEMORY_MODE_GENERATION: AtomicU32 = AtomicU32::new(0);
 static OPEN_BUTTON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(36);
@@ -81,66 +80,14 @@ static OPEN_BUTTON_HOVERED: AtomicBool = AtomicBool::new(false);
 static OPEN_BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PREVIEW_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
+fn preview_session_is_open() -> bool {
+    PREVIEW_IS_VISIBLE.load(Ordering::SeqCst) || crate::windows_loading::is_pending()
+}
+
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 
-fn set_low_memory_mode(app: &AppHandle, low: bool) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let _ = window.with_webview(move |webview| {
-        let result = (|| -> windows::core::Result<()> {
-            let core = unsafe { webview.controller().CoreWebView2()? };
-            let core: ICoreWebView2_19 = core.cast()?;
-            let level = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL(if low { 1 } else { 0 });
-            unsafe { core.SetMemoryUsageTargetLevel(level)? };
-
-            // Read the value back from WebView2 instead of treating a successful setter call
-            // as proof. This keeps diagnostics useful when a runtime accepts the interface but
-            // silently ignores an unsupported target level.
-            let mut actual = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL(0);
-            unsafe { core.MemoryUsageTargetLevel(&mut actual)? };
-            if actual != level {
-                return Err(windows::core::Error::new(
-                    windows::core::HRESULT(0x8000_4005_u32 as i32),
-                    format!(
-                        "WebView2 内存模式回读不一致（期望 {}，实际 {}）",
-                        level.0, actual.0
-                    ),
-                ));
-            }
-            crate::diagnostic_log(if low {
-                "WebView2 内存模式已确认：Low"
-            } else {
-                "WebView2 内存模式已确认：Normal"
-            });
-            Ok(())
-        })();
-        if let Err(error) = result {
-            crate::diagnostic_log(&format!("WebView2 内存模式切换失败：{error}"));
-        }
-    });
-}
-
 pub fn prepare_for_use(app: &AppHandle) {
-    MEMORY_MODE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    set_low_memory_mode(app, false);
-}
-
-pub fn schedule_low_memory(app: AppHandle) {
-    let generation = MEMORY_MODE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    std::thread::spawn(move || {
-        std::thread::sleep(LOW_MEMORY_DELAY);
-        if MEMORY_MODE_GENERATION.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        let is_visible = app
-            .get_webview_window("main")
-            .and_then(|window| window.is_visible().ok())
-            .unwrap_or(false);
-        if !is_visible {
-            set_low_memory_mode(&app, true);
-        }
-    });
+    crate::windows_memory::resume(app);
 }
 
 fn window_class_name(window: HWND) -> String {
@@ -172,7 +119,10 @@ fn is_explorer_file_view_class(class_name: &str) -> bool {
 
 fn explorer_file_view_is_foreground(window: HWND) -> bool {
     let top_level_class = window_class_name(window);
-    if top_level_class != "CabinetWClass" && top_level_class != "ExploreWClass" {
+    if !matches!(
+        top_level_class.as_str(),
+        "CabinetWClass" | "ExploreWClass" | "Progman" | "WorkerW"
+    ) {
         return false;
     }
 
@@ -186,7 +136,43 @@ fn explorer_file_view_is_foreground(window: HWND) -> bool {
     }
 
     let focus_class = window_class_name(thread_info.hwndFocus);
-    is_explorer_file_view_class(&focus_class)
+    accepts_shell_focus(&top_level_class, &focus_class)
+}
+
+fn accepts_shell_focus(top_level_class: &str, focus_class: &str) -> bool {
+    match top_level_class {
+        "CabinetWClass" | "ExploreWClass" => is_explorer_file_view_class(focus_class),
+        // Do not treat wallpaper hosts, taskbar or rename editors as a file list.
+        "Progman" | "WorkerW" => matches!(focus_class, "SysListView32" | "SHELLDLL_DefView"),
+        _ => false,
+    }
+}
+
+unsafe extern "system" fn selection_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    window: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if !preview_session_is_open() {
+        return;
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    if unsafe { GetAncestor(window, GA_ROOT) } != foreground
+        || !explorer_file_view_is_foreground(foreground)
+    {
+        return;
+    }
+    // No COM calls in a hook callback. Coalesce a burst of focus/selection events
+    // on the existing worker queue, then read the committed Shell selection.
+    let thread_id = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if thread_id != 0 {
+        let _ =
+            unsafe { PostThreadMessageW(thread_id, WM_QUICKPEEK_REFRESH, WPARAM(0), LPARAM(0)) };
+    }
 }
 
 fn preview_window_is_foreground(window: HWND) -> bool {
@@ -224,7 +210,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     return LRESULT(1);
                 }
                 let foreground = unsafe { GetForegroundWindow() };
-                if PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+                if preview_session_is_open()
                     && (explorer_file_view_is_foreground(foreground)
                         || preview_window_is_foreground(foreground))
                 {
@@ -285,6 +271,22 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 fn selected_file(foreground: HWND) -> windows::core::Result<Option<PathBuf>> {
     unsafe {
         let shell_windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)?;
+        if matches!(
+            window_class_name(foreground).as_str(),
+            "Progman" | "WorkerW"
+        ) {
+            // Desktop items can live in either the personal or public desktop,
+            // so ask Shell for the selected item rather than constructing a path.
+            let mut desktop_window = 0;
+            let dispatch = shell_windows.FindWindowSW(
+                &VARIANT::default(),
+                &VARIANT::default(),
+                SWC_DESKTOP,
+                &mut desktop_window,
+                SWFO_NEEDDISPATCH,
+            )?;
+            return selected_file_from_provider(&dispatch.cast()?);
+        }
         for index in 0..shell_windows.Count()? {
             let dispatch = shell_windows.Item(&VARIANT::from(index))?;
             let browser: IWebBrowser2 = dispatch.cast()?;
@@ -293,23 +295,30 @@ fn selected_file(foreground: HWND) -> windows::core::Result<Option<PathBuf>> {
             }
 
             let provider: IServiceProvider = browser.cast()?;
-            let shell_browser: IShellBrowser = provider.QueryService(&SID_STopLevelBrowser)?;
-            let shell_view = shell_browser.QueryActiveShellView()?;
-            let folder_view: IFolderView2 = shell_view.cast()?;
-            let selection = folder_view.GetSelection(false)?;
-            if selection.GetCount()? == 0 {
-                return Ok(None);
-            }
-
-            let item = selection.GetItemAt(0)?;
-            let display_name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
-            let path = display_name.to_string().ok().map(PathBuf::from);
-            CoTaskMemFree(Some(display_name.0.cast::<c_void>()));
-            return Ok(path);
+            return selected_file_from_provider(&provider);
         }
     }
-
     Ok(None)
+}
+
+fn selected_file_from_provider(
+    provider: &IServiceProvider,
+) -> windows::core::Result<Option<PathBuf>> {
+    unsafe {
+        let shell_browser: IShellBrowser = provider.QueryService(&SID_STopLevelBrowser)?;
+        let shell_view = shell_browser.QueryActiveShellView()?;
+        let folder_view: IFolderView2 = shell_view.cast()?;
+        let selection = folder_view.GetSelection(false)?;
+        if selection.GetCount()? == 0 {
+            return Ok(None);
+        }
+
+        let item = selection.GetItemAt(0)?;
+        let display_name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let path = display_name.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(display_name.0.cast::<c_void>()));
+        Ok(path)
+    }
 }
 
 fn preview_path_store() -> &'static Mutex<Option<PathBuf>> {
@@ -732,8 +741,21 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
     HOOK_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0)? };
+    let selection_hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_FOCUS,
+            EVENT_OBJECT_SELECTIONWITHIN,
+            None,
+            Some(selection_changed),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        )
+    };
+    if selection_hook.0.is_null() {
+        crate::diagnostic_log("无法监听文件选择变化；方向键预览仍可使用");
+    }
     let mut message = MSG::default();
-    let mut last_previewed_path: Option<PathBuf> = None;
     let mut refresh_timer_id: Option<usize> = None;
 
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
@@ -742,23 +764,20 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
                 .get_webview_window("main")
                 .and_then(|window| window.is_visible().ok())
                 .unwrap_or(false);
-            if is_visible {
+            if is_visible || crate::windows_loading::is_pending() {
                 crate::hide_preview(&app);
-                last_previewed_path = None;
             } else {
                 let foreground = unsafe { GetForegroundWindow() };
                 if explorer_file_view_is_foreground(foreground) {
                     if let Ok(Some(path)) = selected_file(foreground) {
                         if path.is_file() || path.is_dir() {
                             crate::open_preview_path(&app, path.clone());
-                            last_previewed_path = Some(path);
                         }
                     }
                 }
             }
         } else if message.message == WM_QUICKPEEK_HIDE {
             crate::hide_preview(&app);
-            last_previewed_path = None;
         } else if message.message == WM_QUICKPEEK_REFRESH {
             if refresh_timer_id.is_none() {
                 let timer_id = unsafe { SetTimer(None, REFRESH_TIMER_ID, 35, None) };
@@ -777,13 +796,16 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
                 .and_then(|window| window.is_visible().ok())
                 .unwrap_or(false);
             let foreground = unsafe { GetForegroundWindow() };
-            if is_visible && explorer_file_view_is_foreground(foreground) {
+            if (is_visible || crate::windows_loading::is_pending())
+                && explorer_file_view_is_foreground(foreground)
+            {
                 if let Ok(Some(path)) = selected_file(foreground) {
                     if (path.is_file() || path.is_dir())
-                        && last_previewed_path.as_ref() != Some(&path)
+                        && preview_path_store()
+                            .lock()
+                            .is_ok_and(|current| current.as_ref() != Some(&path))
                     {
                         crate::open_preview_path(&app, path.clone());
-                        last_previewed_path = Some(path);
                     }
                 }
             }
@@ -791,6 +813,12 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
     }
 
     let _ = unsafe { UnhookWindowsHookEx(hook) };
+    if !selection_hook.0.is_null() {
+        let _ = unsafe { UnhookWinEvent(selection_hook) };
+    }
+    if let Some(timer_id) = refresh_timer_id {
+        let _ = unsafe { KillTimer(None, timer_id) };
+    }
     unsafe { CoUninitialize() };
     Ok(())
 }
@@ -813,10 +841,16 @@ pub fn start(app: AppHandle) {
 fn raise_preview_window(window_handle: HWND) -> windows::core::Result<()> {
     unsafe {
         // The preview must leave Explorer active so arrow-key navigation keeps working.
-        // ShowWindowAsync and SWP_ASYNCWINDOWPOS marshal the first visibility/z-order
-        // transition to the Tauri window thread instead of relying on a cross-thread,
-        // non-activating ShowWindow call during WebView startup.
-        let _ = ShowWindowAsync(window_handle, SW_SHOWNOACTIVATE);
+        // Complete visibility on the owning UI thread before re-stacking native
+        // children. Queuing even this same-thread show lets their resize/show run
+        // first, then WebView's parent-show handling can cover the native viewer.
+        let own_thread = GetWindowThreadProcessId(window_handle, None)
+            == windows::Win32::System::Threading::GetCurrentThreadId();
+        if own_thread {
+            let _ = ShowWindow(window_handle, SW_SHOWNOACTIVATE);
+        } else {
+            let _ = ShowWindowAsync(window_handle, SW_SHOWNOACTIVATE);
+        }
         SetWindowPos(
             window_handle,
             Some(HWND_TOPMOST),
@@ -824,8 +858,11 @@ fn raise_preview_window(window_handle: HWND) -> windows::core::Result<()> {
             0,
             0,
             0,
-            SWP_ASYNCWINDOWPOS
-                | SWP_NOMOVE
+            (if own_thread {
+                Default::default()
+            } else {
+                SWP_ASYNCWINDOWPOS
+            }) | SWP_NOMOVE
                 | SWP_NOSIZE
                 | SWP_NOACTIVATE
                 | SWP_NOOWNERZORDER
@@ -857,8 +894,10 @@ pub fn show_without_activation(app: &AppHandle) {
     // z-order operation; raising the owner afterwards can hide it until activation.
     position_open_button(app);
     crate::windows_preview_handler::resize();
+    crate::windows_loading::reposition(app);
 
     let window_handle_value = window_handle.0 as isize;
+    let loading_app = app.clone();
     std::thread::spawn(move || {
         // The first WebView composition/frame can finish after the initial native show.
         // Cover that startup-only race without activating the preview or stealing
@@ -876,6 +915,9 @@ pub fn show_without_activation(app: &AppHandle) {
             if button != 0 {
                 position_open_button_handles(delayed_window, HWND(button as *mut c_void));
             }
+            // The loading cover is another owned popup, just like the caption
+            // button. Keep it above the WebView after every owner z-order update.
+            crate::windows_loading::reposition(&loading_app);
         }
     });
 }
@@ -931,7 +973,7 @@ pub fn hide_window(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_explorer_file_view_class, is_navigation_key};
+    use super::{accepts_shell_focus, is_explorer_file_view_class, is_navigation_key};
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
 
     #[test]
@@ -945,6 +987,54 @@ mod tests {
     fn rejects_text_input_and_unknown_controls() {
         for class_name in ["Edit", "RichEditD2DPT", "ComboBox", "", "ToolbarWindow32"] {
             assert!(!is_explorer_file_view_class(class_name));
+        }
+    }
+
+    #[test]
+    fn desktop_preview_requires_focus_on_its_file_list() {
+        for desktop in ["Progman", "WorkerW"] {
+            for view in ["SysListView32", "SHELLDLL_DefView"] {
+                assert!(accepts_shell_focus(desktop, view));
+            }
+            for other in [
+                "Edit",
+                "RichEditD2DPT",
+                "DirectUIHWND",
+                "WorkerW",
+                "",
+                "ToolbarWindow32",
+            ] {
+                assert!(!accepts_shell_focus(desktop, other));
+            }
+        }
+        for shell in ["CabinetWClass", "ExploreWClass"] {
+            assert!(accepts_shell_focus(shell, "DirectUIHWND"));
+            assert!(!accepts_shell_focus(shell, "Edit"));
+        }
+        for other in ["Shell_TrayWnd", "Notepad", "Chrome_WidgetWin_1", ""] {
+            assert!(!accepts_shell_focus(other, "SysListView32"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a running Windows Explorer desktop"]
+    fn can_query_desktop_selection_without_activating_it() {
+        use windows::{
+            core::w,
+            Win32::{
+                System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+                UI::WindowsAndMessaging::FindWindowW,
+            },
+        };
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let desktop = FindWindowW(w!("Progman"), None).unwrap();
+            let selection =
+                super::selected_file(desktop).expect("desktop Shell selection lookup failed");
+            if let Some(path) = selection {
+                assert!(path.is_absolute());
+            }
+            CoUninitialize();
         }
     }
 

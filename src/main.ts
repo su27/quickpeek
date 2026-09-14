@@ -16,6 +16,7 @@ import {
   MIN_READABLE_IMAGE_WIDTH,
 } from "./image-layout";
 import type { SearchStatus } from "./viewer-types";
+import { PreviewCleanup, nextPreviewPaint } from "./preview-cleanup";
 import "./style.css";
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -26,7 +27,6 @@ const $ = <T extends HTMLElement>(selector: string): T => {
 
 const fileInput = $<HTMLInputElement>("#fileInput");
 const app = $<HTMLElement>("#app");
-const emptyOpenButton = $<HTMLButtonElement>("#emptyOpenButton");
 const workspace = $<HTMLElement>("#workspace");
 const documentViewport = $<HTMLElement>("#documentViewport");
 let documentHost = $<HTMLElement>("#documentHost");
@@ -65,6 +65,13 @@ let pageIndicatorFrame = 0;
 let queuedNativeRequest: NativePreviewRequest | null = null;
 let nativeLoadInProgress = false;
 let loadSequence = 0;
+let pendingLoad: AbortController | null = null;
+const previewCleanup = new PreviewCleanup();
+
+function nextLoadSequence(): number {
+  pendingLoad?.abort();
+  return ++loadSequence;
+}
 
 const MAX_PREVIEW_WORK_AREA_WIDTH = 0.94;
 const MAX_PREVIEW_WORK_AREA_HEIGHT = 0.92;
@@ -125,11 +132,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-function nextPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
-  });
-}
+const nextPaint = nextPreviewPaint;
 
 function measurePreviewDimensions(kind: DocumentKind): { height: number; width: number } | null {
   if (activeDocument?.rendered.previewDimensions) {
@@ -161,14 +164,16 @@ function measurePreviewDimensions(kind: DocumentKind): { height: number; width: 
 async function resizeWindowForPreview(
   kind: DocumentKind,
   suppliedDimensions?: { height: number; width: number } | null,
+  signal?: AbortSignal,
 ): Promise<{ height: number; width: number } | null> {
   if (!isTauri()) return null;
 
   try {
-    if (suppliedDimensions === undefined) await nextPaint();
+    if (suppliedDimensions === undefined) await nextPaint(signal);
+    if (signal?.aborted) return null;
     const { currentMonitor, getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
     const monitor = await currentMonitor();
-    if (!monitor) return null;
+    if (!monitor || signal?.aborted) return null;
 
     const workArea = monitor.workArea.size.toLogical(monitor.scaleFactor);
     const maximumWidth = Math.max(320, workArea.width * MAX_PREVIEW_WORK_AREA_WIDTH);
@@ -235,12 +240,7 @@ async function resizeWindowForPreview(
     } else if (kind === "pdf") {
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
       height = maximumHeight;
-    } else if (kind === "docx" || kind === "system") {
-      width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
-      height = dimensions
-        ? clamp(dimensions.height + 32, Math.min(360, maximumHeight), maximumHeight)
-        : clamp(workArea.height * 0.76, Math.min(440, maximumHeight), maximumHeight);
-    } else if (kind === "text") {
+    } else if (kind === "docx" || kind === "system" || kind === "text" || kind === "font" || kind === "epub") {
       width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
       height = maximumHeight;
     } else if (kind === "pptx" && dimensions) {
@@ -259,9 +259,11 @@ async function resizeWindowForPreview(
     const appWindow = getCurrentWindow();
     const targetSize = { height: Math.round(height), width: Math.round(width) };
     if (await appWindow.isMaximized()) await appWindow.unmaximize();
+    if (signal?.aborted) return null;
     await appWindow.setSize(new LogicalSize(targetSize.width, targetSize.height));
+    if (signal?.aborted) return null;
     await appWindow.center();
-    await nextPaint();
+    await nextPaint(signal);
     return targetSize;
   } catch (error) {
     console.warn("无法自动调整预览窗口", error);
@@ -402,7 +404,6 @@ function resetViewer(): void {
   clearRenderedDocument();
   currentPageLabel = "";
   updateWindowTitle();
-  workspace.classList.add("is-empty");
   workspace.classList.remove("has-document");
   setControlsEnabled(false);
 }
@@ -428,7 +429,7 @@ function updatePageIndicator(): void {
 
   const pages = activeDocument?.pageElements ?? [];
   if (pages.length === 0) {
-    setPageLabel(documentHost.childElementCount > 0 ? "1/1 页" : "0/0 页");
+    setPageLabel("");
     return;
   }
 
@@ -501,7 +502,6 @@ function commitStagedDocument(
   documentViewport.className = `document-viewport is-${format.kind}`;
   documentViewport.scrollTop = 0;
   documentViewport.scrollLeft = 0;
-  workspace.classList.remove("is-empty");
   workspace.classList.add("has-document");
 
   destroyRenderedDocument(oldDocument?.rendered);
@@ -519,6 +519,9 @@ async function loadPreview(
   let host: HTMLElement | null = null;
   let rendered: RenderedDocument | null = null;
   let releaseSource: (() => void) | undefined;
+  const cancellation = new AbortController();
+  const finishCleanup = previewCleanup.begin();
+  pendingLoad = cancellation;
 
   try {
     const source = await readSource();
@@ -534,6 +537,7 @@ async function loadPreview(
       preflightSize = await resizeWindowForPreview(
         format.kind,
         format.kind === "pdf" ? source.previewDimensions ?? null : null,
+        cancellation.signal,
       );
       if (request !== loadSequence) return false;
     }
@@ -543,11 +547,13 @@ async function loadPreview(
     host.setAttribute("aria-hidden", "true");
     documentViewport.append(host);
     const formatRendered = await format.render(source, {
+      signal: cancellation.signal,
       host,
       viewport: documentViewport,
       isActive: () => host === documentHost,
       previewWidth: preflightSize?.width,
       setPageLabel,
+      contentChanged: closeSearch,
     });
     rendered = keepSourceAlive(formatRendered, releaseSource);
     releaseSource = undefined;
@@ -572,9 +578,16 @@ async function loadPreview(
       updatePageIndicator();
     }
 
-    if (!preflightWindow) await resizeWindowForPreview(format.kind);
+    if (!preflightWindow) await resizeWindowForPreview(format.kind, undefined, cancellation.signal);
+    // Preflight renderers resized before commit. They still need a paint after
+    // removing is-staging, before the native loading cover can be dismissed.
+    else await nextPaint(cancellation.signal);
     return request === loadSequence && activeDocument?.rendered === rendered;
   } catch (error) {
+    if (cancellation.signal.aborted || request !== loadSequence) {
+      discardStagedDocument(host, rendered);
+      return false;
+    }
     reportFrontendError(errorContext, error);
     discardStagedDocument(host, rendered);
     if (!activeDocument) {
@@ -589,15 +602,19 @@ async function loadPreview(
     }
     return false;
   } finally {
-    releaseSource?.();
+    if (pendingLoad === cancellation) pendingLoad = null;
+    try { releaseSource?.(); } finally { finishCleanup(); }
   }
 }
 
 async function loadFile(file: File, request: number): Promise<boolean> {
+  if (isTauri()) await invoke("prepare_preview_engine");
+  if (request !== loadSequence) return false;
   const detectedFormat = findDocumentFormat(file.name);
   // Browser File objects do not expose a stable Windows path, so a system COM
   // preview handler cannot open a dragged legacy .doc file safely.
-  const format = detectedFormat.kind === "system"
+  const browserZip = detectedFormat.kind === "archive" && /\.(zip|jar|war|apk|vsix|nupkg)$/i.test(file.name) && file.size <= 64 * 1024 * 1024;
+  const format = detectedFormat.loadMode === "metadata" && !browserZip
     ? fileInfoDocumentFormat(false)
     : detectedFormat;
 
@@ -605,6 +622,9 @@ async function loadFile(file: File, request: number): Promise<boolean> {
     format,
     request,
     async () => {
+      if (browserZip) {
+        return { type: "buffer" as const, bytes: await file.arrayBuffer(), mimeType: "application/zip", name: file.name, size: file.size };
+      }
       if (format.loadMode === "metadata") {
         return {
           type: "metadata" as const,
@@ -725,23 +745,29 @@ async function loadDocumentFromPath(
     false,
   );
   if (loaded) {
-    await invoke("show_preview_window", { generation });
+    await invoke("show_preview_window", { generation, title: document.title });
+    if (request === loadSequence) activeDocument?.rendered.start?.();
     return;
   }
 
-  if (request !== loadSequence || format.kind === "file" || format.kind === "folder") return;
+  if (request !== loadSequence) return;
+  if (format.kind === "file" || format.kind === "folder") {
+    await invoke("hide_preview_window", { generation });
+    return;
+  }
   const fallbackLoaded = await loadPreview(
     fileInfoDocumentFormat(isDirectory),
     request,
     metadataSource,
     `show file information for ${path}`,
   );
-  if (fallbackLoaded) await invoke("show_preview_window", { generation });
+  if (fallbackLoaded) await invoke("show_preview_window", { generation, title: document.title });
+  else if (request === loadSequence) await invoke("hide_preview_window", { generation });
 }
 
 async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void> {
   queuedNativeRequest = preview;
-  loadSequence += 1;
+  nextLoadSequence();
   if (nativeLoadInProgress) return;
 
   nativeLoadInProgress = true;
@@ -764,10 +790,14 @@ async function initializeNativePreview(): Promise<void> {
   await listen<NativePreviewRequest>("preview-file", (event) => {
     void enqueueNativePreview(event.payload);
   });
-  await listen("preview-hidden", () => {
-    loadSequence += 1;
+  await listen<number>("preview-hidden", async (event) => {
+    const request = nextLoadSequence();
     queuedNativeRequest = null;
     resetViewer();
+    await previewCleanup.drained();
+    if (request !== loadSequence || activeDocument || queuedNativeRequest) return;
+    void invoke("preview_cleanup_complete", { generation: event.payload })
+      .catch(error => reportFrontendError("acknowledge preview cleanup", error));
   });
 
   const initialPreview = await invoke<NativePreviewRequest | null>("get_initial_preview");
@@ -888,10 +918,9 @@ function moveMatch(delta: 1 | -1): void {
   updateCurrentDocxHighlight();
 }
 
-emptyOpenButton.addEventListener("click", openPicker);
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void loadFile(file, ++loadSequence);
+  if (file) void loadFile(file, nextLoadSequence()).then((loaded) => { if (loaded) activeDocument?.rendered.start?.(); });
 });
 
 documentViewport.addEventListener("scroll", () => {
@@ -943,7 +972,7 @@ workspace.addEventListener("drop", (event) => {
   workspace.classList.remove("is-dragging");
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length > 1) showToast("一次只会打开第一个受支持的文件");
-  if (files[0]) void loadFile(files[0], ++loadSequence);
+  if (files[0]) void loadFile(files[0], nextLoadSequence()).then((loaded) => { if (loaded) activeDocument?.rendered.start?.(); });
 });
 
 document.addEventListener("keydown", (event) => {

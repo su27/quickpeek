@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" style="background: #202020">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
-    <meta name="theme-color" content="#f4f6f8" />
+    <meta name="theme-color" content="#202020" />
     <title>QuickPeek</title>
   </head>
   <body>
@@ -27,7 +27,7 @@
 
       </div>
 
-      <main id="workspace" class="workspace is-empty">
+      <main id="workspace" class="workspace">
         <div id="dropOverlay" class="drop-overlay" aria-hidden="true">
           <div class="drop-card">
             <svg viewBox="0 0 32 32" aria-hidden="true">
@@ -38,20 +38,6 @@
             <span>支持文档、媒体、压缩包和任意普通文件</span>
           </div>
         </div>
-
-        <section id="emptyState" class="empty-state">
-          <div class="empty-illustration" aria-hidden="true">
-            <div class="paper paper-back"></div>
-            <div class="paper paper-front">
-              <span></span><span></span><span></span><span></span>
-            </div>
-            <div class="word-badge">W</div>
-          </div>
-          <h1>打开一个文件</h1>
-          <p>支持文档、图片、音视频、压缩包、文本和代码，文件只在本机解析。</p>
-          <button id="emptyOpenButton" class="button button-primary button-large" type="button">选择文件</button>
-          <span class="shortcut-hint"><kbd>Ctrl</kbd><span>+</span><kbd>O</kbd> 快速打开</span>
-        </section>
 
         <div id="documentViewport" class="document-viewport" aria-label="文件预览">
           <article id="documentHost" class="document-host"></article>

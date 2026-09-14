@@ -254,7 +254,7 @@ impl PreviewHandlerController {
             }
             Ok(Some(_)) => false,
             Ok(None) => {
-                crate::diagnostic_log("当前系统没有为 .doc 注册预览处理器");
+                crate::diagnostic_log("当前系统没有为此文件注册预览处理器");
                 false
             }
             Err(error) => {
@@ -319,23 +319,35 @@ impl PreviewHandlerController {
 
 struct PreviewHandlerHost {
     generation: u32,
-    handler: IPreviewHandler,
+    handler: Option<IPreviewHandler>,
     host_window: HWND,
     // Some preview handlers keep reading lazily after DoPreview returns.
     _stream: Option<IStream>,
+    _rtf: Option<crate::windows_rtf::RtfLibrary>,
 }
 
 impl PreviewHandlerHost {
     fn open(parent: HWND, path: &Path, generation: u32) -> windows::core::Result<Option<Self>> {
-        if !path
+        let extension = path
             .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("doc"))
-        {
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if extension == "rtf" {
+            let (host_window, library) = crate::windows_rtf::open(parent, path, generation)?;
+            return Ok(Some(Self {
+                generation,
+                handler: None,
+                host_window,
+                _stream: None,
+                _rtf: Some(library),
+            }));
+        }
+        if !["doc", "ppt", "pps", "pot"].contains(&extension.as_str()) {
             return Ok(None);
         }
 
-        let Some(clsid) = preview_handler_clsid(".doc")? else {
+        let Some(clsid) = preview_handler_clsid(&format!(".{extension}"))? else {
             return Ok(None);
         };
         let instance = unsafe {
@@ -375,9 +387,10 @@ impl PreviewHandlerHost {
         // DoPreview failures must Unload and destroy the native child.
         let mut host = Self {
             generation,
-            handler,
+            handler: Some(handler),
             host_window,
             _stream: None,
+            _rtf: None,
         };
         let (initialized, stream) = initialize_handler(&instance, path);
         host._stream = stream;
@@ -388,8 +401,9 @@ impl PreviewHandlerHost {
             ));
         }
         unsafe {
-            host.handler.SetWindow(host_window, &preview_bounds)?;
-            host.handler.DoPreview()?;
+            let handler = host.handler.as_ref().unwrap();
+            handler.SetWindow(host_window, &preview_bounds)?;
+            handler.DoPreview()?;
         }
         Ok(Some(host))
     }
@@ -421,7 +435,9 @@ impl PreviewHandlerHost {
             bottom: height,
         };
         unsafe {
-            self.handler.SetRect(&preview_bounds)?;
+            if let Some(handler) = &self.handler {
+                handler.SetRect(&preview_bounds)?;
+            }
             SetWindowPos(
                 self.host_window,
                 Some(HWND_TOP),
@@ -445,7 +461,9 @@ impl Drop for PreviewHandlerHost {
     fn drop(&mut self) {
         unsafe {
             let _ = ShowWindow(self.host_window, SW_HIDE);
-            let _ = self.handler.Unload();
+            if let Some(handler) = &self.handler {
+                let _ = handler.Unload();
+            }
             let _ = DestroyWindow(self.host_window);
         }
     }
@@ -484,10 +502,16 @@ fn initialize_handler(instance: &IUnknown, path: &Path) -> (bool, Option<IStream
 
 fn preview_handler_clsid(extension: &str) -> windows::core::Result<Option<GUID>> {
     let direct_key = format!(r"{extension}\{PREVIEW_HANDLER_SHELLEX_KEY}");
-    let value = read_registry_string(&direct_key).or_else(|| {
-        let class_name = read_registry_string(extension)?;
-        read_registry_string(&format!(r"{class_name}\{PREVIEW_HANDLER_SHELLEX_KEY}"))
-    });
+    let value = read_registry_string(&direct_key)
+        .or_else(|| {
+            let class_name = read_registry_string(extension)?;
+            read_registry_string(&format!(r"{class_name}\{PREVIEW_HANDLER_SHELLEX_KEY}"))
+        })
+        .or_else(|| {
+            read_registry_string(&format!(
+                r"SystemFileAssociations\{extension}\{PREVIEW_HANDLER_SHELLEX_KEY}"
+            ))
+        });
     value
         .map(|value| unsafe { CLSIDFromString(&HSTRING::from(value)) }.map(Some))
         .unwrap_or(Ok(None))
@@ -537,6 +561,81 @@ fn read_registry_string(subkey: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::preview_handler_clsid;
+
+    #[test]
+    #[ignore = "hidden RTF host lifecycle test; run with --test-threads=1"]
+    fn rtf_activation_resize_and_unload_preserve_native_layer() {
+        use super::*;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindow, GetWindowLongW, IsWindow, GWL_STYLE, GW_CHILD,
+            WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        let path = std::env::var_os("QUICKPEEK_RTF_FIXTURE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testfiles/license-zh-cn.rtf")
+            });
+        assert!(path.is_file(), "set QUICKPEEK_RTF_FIXTURE");
+        unsafe {
+            let parent = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("hidden RTF host"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                850,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let foreground = GetForegroundWindow();
+            let generation = crate::PREVIEW_GENERATION.load(Ordering::SeqCst);
+            let mut controller = PreviewHandlerController::default();
+            assert!(controller.prepare(parent, &path, generation));
+            assert!(controller.active.is_none());
+            let child = controller.pending.as_ref().unwrap().host_window;
+            assert_eq!(GetWindowLongW(child, GWL_STYLE) as u32 & WS_VISIBLE.0, 0);
+            assert!(controller.activate(generation));
+            assert_ne!(GetWindowLongW(child, GWL_STYLE) as u32 & WS_VISIBLE.0, 0);
+            // Model WebView's sibling being raised during resume/parent show.
+            let competitor = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("browser layer"),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                800,
+                650,
+                Some(parent),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            SetWindowPos(competitor, Some(HWND_TOP), 0, 0, 800, 650, SWP_NOACTIVATE).unwrap();
+            assert_eq!(GetWindow(parent, GW_CHILD).unwrap(), competitor);
+            controller.resize(parent);
+            assert_eq!(GetWindow(parent, GW_CHILD).unwrap(), child);
+            let mut parent_rect = RECT::default();
+            let mut child_rect = RECT::default();
+            GetClientRect(parent, &mut parent_rect).unwrap();
+            // GetWindowRect includes the Rich Edit vertical scrollbar.
+            windows::Win32::UI::WindowsAndMessaging::GetWindowRect(child, &mut child_rect).unwrap();
+            assert_eq!(child_rect.right - child_rect.left, parent_rect.right);
+            assert_eq!(child_rect.bottom - child_rect.top, parent_rect.bottom);
+            controller.unload(Some(generation.wrapping_add(1)));
+            assert!(IsWindow(Some(child)).as_bool());
+            controller.unload(Some(generation));
+            assert!(!IsWindow(Some(child)).as_bool());
+            assert_eq!(GetForegroundWindow(), foreground, "hidden test stole focus");
+            DestroyWindow(parent).unwrap();
+        }
+    }
 
     #[test]
     fn querying_an_unknown_extension_is_a_clean_miss() {

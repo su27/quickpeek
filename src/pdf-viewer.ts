@@ -40,9 +40,12 @@ async function renderNativePdf(
     const image = document.createElement("img");
     image.alt = `PDF 第 ${index + 1} 页`;
     image.draggable = false;
-    page.append(image);
+    const errorLabel = document.createElement("span");
+    errorLabel.className = "pdf-native-page-error";
+    errorLabel.hidden = true;
+    page.append(image, errorLabel);
     viewer.append(page);
-    return { image, page };
+    return { image, page, errorLabel };
   });
   host.append(viewer);
 
@@ -59,7 +62,9 @@ async function renderNativePdf(
       if (candidatePosition < 0) return;
       const [candidate] = renderOrder.splice(candidatePosition, 1);
       if (candidate === undefined) return;
-      pageElements[candidate]?.image.removeAttribute("src");
+      const entry = pageElements[candidate];
+      entry.page.classList.remove("is-ready");
+      entry.image.removeAttribute("src");
       rendered.delete(candidate);
     }
   };
@@ -72,6 +77,7 @@ async function renderNativePdf(
     if (!entry) return Promise.resolve();
 
     const task = (async () => {
+      entry.errorLabel.hidden = true;
       // A first preview is rendered while the document viewport is display:none,
       // so clientWidth can be zero. Use the already-computed window width rather
       // than accidentally rasterizing the first page at the 64px fallback size.
@@ -94,26 +100,43 @@ async function renderNativePdf(
         URL.revokeObjectURL(imageUrl);
       }
       if (destroyed) return;
+      entry.page.classList.add("is-ready");
       rendered.add(index);
       const previous = renderOrder.indexOf(index);
       if (previous >= 0) renderOrder.splice(previous, 1);
       renderOrder.push(index);
       evictDistantPages();
-    })().finally(() => rendering.delete(index));
+    })().catch((error) => {
+      entry.page.classList.remove("is-ready");
+      entry.image.removeAttribute("src");
+      if (!destroyed) {
+        entry.errorLabel.textContent = "此页暂时无法显示";
+        entry.errorLabel.hidden = false;
+      }
+      throw error;
+    }).finally(() => rendering.delete(index));
     rendering.set(index, task);
     return task;
   };
 
   // The first page is decoded before the preview window is shown. Its first
   // visible frame is therefore already rendered at the final fitted width.
-  await renderPage(0);
+  try {
+    await renderPage(0);
+  } catch (error) {
+    destroyed = true;
+    viewer.remove();
+    throw error;
+  }
 
   const loadObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       const index = Number((entry.target as HTMLElement).dataset.pageIndex);
       if (entry.isIntersecting) {
         nearby.add(index);
-        void renderPage(index);
+        // Later-page failures belong to their placeholder, not an unhandled
+        // rejection. Re-entering the viewport can retry the page normally.
+        void renderPage(index).catch(() => {});
       } else {
         nearby.delete(index);
       }
@@ -150,7 +173,14 @@ async function renderNativePdf(
       destroyed = true;
       loadObserver.disconnect();
       pageObserver.disconnect();
-      for (const { image } of pageElements) image.removeAttribute("src");
+      for (const { image, page } of pageElements) {
+        page.classList.remove("is-ready");
+        image.removeAttribute("src");
+      }
+      rendered.clear();
+      nearby.clear();
+      visibleRatios.clear();
+      renderOrder.length = 0;
       viewer.remove();
     },
   };

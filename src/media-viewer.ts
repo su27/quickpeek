@@ -1,8 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PreviewDimensions } from "./document-formats";
+import { createMediaSession } from "./media-lifecycle";
 
 type MediaViewerResult = {
   readonly dimensions: PreviewDimensions | null;
+  start(): void;
   destroy(): void;
 };
 
@@ -49,68 +51,44 @@ function appendAudioDetail(host: HTMLElement, label: string, value: string | und
   host.append(detail);
 }
 
-function waitForMetadata(media: HTMLMediaElement, label: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onLoaded = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onError = (): void => {
-      cleanup();
-      reject(new Error(`${label}解码失败或系统缺少相应编解码器`));
-    };
-    const cleanup = (): void => {
-      media.removeEventListener("loadedmetadata", onLoaded);
-      media.removeEventListener("error", onError);
-    };
-    media.addEventListener("loadedmetadata", onLoaded, { once: true });
-    media.addEventListener("error", onError, { once: true });
-  });
-}
-
-function releaseMedia(media: HTMLMediaElement): void {
-  media.pause();
-  media.removeAttribute("src");
-  media.querySelectorAll("source").forEach((source) => source.remove());
-  media.load();
+function showMediaError(frame: HTMLElement, message: string): void {
+  const error = document.createElement("p");
+  error.className = "media-error";
+  error.textContent = message;
+  frame.replaceChildren(error);
 }
 
 export async function renderVideoViewer(
   url: string,
-  mimeType: string,
   host: HTMLElement,
+  signal: AbortSignal,
 ): Promise<MediaViewerResult> {
   const frame = document.createElement("section");
   frame.className = "video-viewer";
   const video = document.createElement("video");
-  video.autoplay = true;
   video.controls = true;
   video.preload = "metadata";
   video.playsInline = true;
-  const source = document.createElement("source");
-  source.src = url;
-  source.type = mimeType;
-  video.append(source);
   frame.append(video);
   host.classList.add("is-video");
   host.append(frame);
-  video.load();
+  const session = createMediaSession(video, signal, (message) => showMediaError(frame, message));
 
   try {
-    await waitForMetadata(video, "视频");
-    await video.play();
+    await session.load(url);
   } catch (error) {
-    releaseMedia(video);
+    session.dispose();
     frame.remove();
     throw error;
   }
 
   return {
+    start: session.start,
     dimensions: video.videoWidth > 0 && video.videoHeight > 0
       ? { width: video.videoWidth, height: video.videoHeight }
       : null,
     destroy() {
-      releaseMedia(video);
+      session.dispose();
       frame.remove();
     },
   };
@@ -118,10 +96,10 @@ export async function renderVideoViewer(
 
 export async function renderAudioViewer(
   url: string,
-  mimeType: string,
   name: string,
   path: string | undefined,
   host: HTMLElement,
+  signal: AbortSignal,
 ): Promise<MediaViewerResult> {
   const metadataPromise = loadAudioMetadata(name, path);
   const frame = document.createElement("section");
@@ -138,48 +116,45 @@ export async function renderAudioViewer(
   const details = document.createElement("div");
   details.className = "audio-viewer-details";
   const audio = document.createElement("audio");
-  audio.autoplay = true;
   audio.controls = true;
   audio.preload = "metadata";
-  const source = document.createElement("source");
-  source.src = url;
-  source.type = mimeType;
-  audio.append(source);
   frame.append(glyph, title, audio);
   host.classList.add("is-audio");
   host.append(frame);
-  audio.load();
+  const session = createMediaSession(audio, signal, (message) => showMediaError(frame, message));
 
   try {
-    await waitForMetadata(audio, "音频");
-    await audio.play();
-    const metadata = await metadataPromise;
-    if (metadata?.title) {
-      title.textContent = metadata.title;
-      title.title = metadata.title;
-    }
-    if (metadata?.artist) {
-      artist.textContent = metadata.artist;
-      artist.title = metadata.artist;
-      title.after(artist);
-    }
-    appendAudioDetail(details, "专辑", metadata?.album);
-    appendAudioDetail(details, "年份", metadata?.year);
-    appendAudioDetail(details, "音轨", metadata?.track);
-    appendAudioDetail(details, "流派", metadata?.genre);
-    appendAudioDetail(details, "作曲", metadata?.composer);
-    appendAudioDetail(details, "时长", formatDuration(audio.duration));
-    if (details.childElementCount > 0) audio.before(details);
+    await session.load(url);
+    void metadataPromise.then((metadata) => {
+      if (session.disposed) return;
+      if (metadata?.title) {
+        title.textContent = metadata.title;
+        title.title = metadata.title;
+      }
+      if (metadata?.artist) {
+        artist.textContent = metadata.artist;
+        artist.title = metadata.artist;
+        title.after(artist);
+      }
+      appendAudioDetail(details, "专辑", metadata?.album);
+      appendAudioDetail(details, "年份", metadata?.year);
+      appendAudioDetail(details, "音轨", metadata?.track);
+      appendAudioDetail(details, "流派", metadata?.genre);
+      appendAudioDetail(details, "作曲", metadata?.composer);
+      appendAudioDetail(details, "时长", formatDuration(audio.duration));
+      if (details.childElementCount > 0) audio.before(details);
+    });
   } catch (error) {
-    releaseMedia(audio);
+    session.dispose();
     frame.remove();
     throw error;
   }
 
   return {
+    start: session.start,
     dimensions: null,
     destroy() {
-      releaseMedia(audio);
+      session.dispose();
       frame.remove();
     },
   };

@@ -4,8 +4,10 @@ export type DocumentKind =
   | "archive"
   | "audio"
   | "docx"
+  | "epub"
   | "file"
   | "folder"
+  | "font"
   | "image"
   | "pdf"
   | "pptx"
@@ -50,14 +52,17 @@ export type RenderedDocument = {
   fixedPageLabel: string | null;
   previewDimensions: PreviewDimensions | null;
   activate?(): Promise<void>;
+  start?(): void;
   destroy(): void;
 };
 
 export type RenderContext = {
+  signal: AbortSignal;
   host: HTMLElement;
   isActive(): boolean;
   previewWidth?: number;
   setPageLabel(label: string): void;
+  contentChanged?(): void;
   viewport: HTMLElement;
 };
 
@@ -124,10 +129,51 @@ const folderFormat: DocumentFormat = {
 
 const formats: readonly DocumentFormat[] = [
   {
-    kind: "system",
-    extensions: ["doc"],
+    kind: "epub",
+    extensions: ["epub"],
+    loadMode: "buffer",
+    maxReadBytes: 64 * 1024 * 1024,
+    mimeType: "application/epub+zip",
+    searchable: true,
+    async render(source, context) {
+      if (source.size > 64 * 1024 * 1024) throw new Error("EPUB 超过 64 MB 轻量预览上限");
+      const { renderEpubViewer } = await import("./epub-viewer");
+      const viewer = await renderEpubViewer(requireBytes(source), context);
+      return { ...noController(), get fixedPageLabel() { return viewer.label; }, destroy: viewer.destroy };
+    },
+  },
+  {
+    kind: "font",
+    extensions: ["ttf", "otf", "woff", "woff2"],
+    loadMode: "url",
+    mimeType: "application/octet-stream",
+    searchable: false,
+    async render(source, { host, signal }) {
+      if (source.size > 20 * 1024 * 1024) throw new Error("字体超过 20 MB 预览上限");
+      const { renderFontViewer } = await import("./font-viewer");
+      const viewer = await renderFontViewer(requireUrl(source), source.name, host, signal);
+      return noController({ fixedPageLabel: "" }, viewer.destroy);
+    },
+  },
+  {
+    kind: "image",
+    extensions: ["tif", "tiff"],
     loadMode: "metadata",
-    mimeType: "application/msword",
+    mimeType: "image/tiff",
+    searchable: false,
+    async render(source, context) {
+      if (!source.path || source.systemGeneration === undefined) throw new Error("TIFF 预览需要本地路径");
+      const { renderTiffViewer } = await import("./tiff-viewer");
+      const viewer = await renderTiffViewer(source.path, source.systemGeneration, context);
+      return noController({ fixedPageLabel: viewer.info.pageCount > 1 ? `1/${viewer.info.pageCount} 页` : "",
+        previewDimensions: viewer.info }, viewer.destroy);
+    },
+  },
+  {
+    kind: "system",
+    extensions: ["doc", "ppt", "pps", "pot", "rtf"],
+    loadMode: "metadata",
+    mimeType: { doc: "application/msword", ppt: "application/vnd.ms-powerpoint", pps: "application/vnd.ms-powerpoint", pot: "application/vnd.ms-powerpoint", rtf: "application/rtf" },
     searchable: false,
     async render(source, { host }) {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -282,12 +328,12 @@ const formats: readonly DocumentFormat[] = [
       webp: "image/webp",
     },
     searchable: false,
-    async render(source, { host }) {
+    async render(source, { host, signal }) {
       const { renderImageViewer } = await import("./image-viewer");
-      const viewer = await renderImageViewer(requireUrl(source), source.name, host, source.path);
+      const viewer = await renderImageViewer(requireUrl(source), source.name, host, source.path, signal);
       return noController(
         {
-          fixedPageLabel: "1/1 页",
+          fixedPageLabel: "",
           previewDimensions: { width: viewer.width, height: viewer.height },
         },
         viewer.destroy,
@@ -306,13 +352,14 @@ const formats: readonly DocumentFormat[] = [
       webm: "video/webm",
     },
     searchable: false,
-    async render(source, { host }) {
+    async render(source, { host, signal }) {
       const { renderVideoViewer } = await import("./media-viewer");
-      const viewer = await renderVideoViewer(requireUrl(source), source.mimeType, host);
+      const viewer = await renderVideoViewer(requireUrl(source), host, signal);
       return noController(
         {
-          fixedPageLabel: "1/1 页",
+          fixedPageLabel: "",
           previewDimensions: viewer.dimensions,
+          start: viewer.start,
         },
         viewer.destroy,
       );
@@ -332,27 +379,36 @@ const formats: readonly DocumentFormat[] = [
       wav: "audio/wav",
     },
     searchable: false,
-    async render(source, { host }) {
+    async render(source, { host, signal }) {
       const { renderAudioViewer } = await import("./media-viewer");
       const viewer = await renderAudioViewer(
         requireUrl(source),
-        source.mimeType,
         source.name,
         source.path,
         host,
+        signal,
       );
-      return noController({ fixedPageLabel: "1/1 页" }, viewer.destroy);
+      return noController({ fixedPageLabel: "", start: viewer.start }, viewer.destroy);
     },
   },
   {
     kind: "archive",
-    extensions: ["zip"],
-    loadMode: "buffer",
+    extensions: ["zip", "jar", "war", "apk", "vsix", "nupkg", "tar", "tgz", "tbz2", "txz", "7z", "rar"],
+    loadMode: "metadata",
     mimeType: "application/zip",
     searchable: true,
-    async render(source, { host }) {
-      const { renderZipViewer } = await import("./zip-viewer");
-      const viewer = await renderZipViewer(requireBytes(source), host);
+    async render(source, { host, signal }) {
+      if (source.type === "buffer") {
+        const { renderBrowserZip } = await import("./zip-viewer");
+        const viewer = await renderBrowserZip(source.bytes, host);
+        return noController({ fixedPageLabel: `${viewer.count} 项` }, viewer.destroy);
+      }
+      if (!source.path || source.systemGeneration === undefined) throw new Error("压缩包目录预览需要本地路径");
+      const { invoke } = await import("@tauri-apps/api/core");
+      const { previewTask } = await import("./preview-task");
+      const { renderArchiveDirectory } = await import("./zip-viewer");
+      const directory = await previewTask(invoke<import("./zip-viewer").ArchiveDirectory>("read_archive_directory", { path: source.path, generation: source.systemGeneration }), signal);
+      const viewer = renderArchiveDirectory(directory, host);
       return noController({ fixedPageLabel: `${viewer.count} 项` }, viewer.destroy);
     },
   },
@@ -379,7 +435,7 @@ const formats: readonly DocumentFormat[] = [
     async render(source, { host }) {
       const { renderTextViewer } = await import("./text-viewer");
       await renderTextViewer(requireBytes(source), source.name, host, source.size);
-      return noController({ fixedPageLabel: "1/1 页" });
+      return noController({ fixedPageLabel: "" });
     },
   },
 ];
@@ -396,6 +452,9 @@ export function extensionOf(name: string): string {
 export function findDocumentFormat(name: string, isDirectory = false): DocumentFormat {
   if (isDirectory) return folderFormat;
   const lowerName = name.toLocaleLowerCase();
+  if ([".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"].some(suffix => lowerName.endsWith(suffix))) {
+    return formatsByExtension.get("tar")!;
+  }
   const normalizedName = lowerName.startsWith(".") ? lowerName.slice(1) : lowerName;
   if (
     normalizedName.startsWith("env.")

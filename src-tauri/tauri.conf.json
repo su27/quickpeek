@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "QuickPeek",
-  "version": "0.10.6",
+  "version": "0.10.9",
   "identifier": "com.su27.quickpeek",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,7 +22,8 @@
         "resizable": true,
         "fullscreen": false,
         "dragDropEnabled": false,
-        "visible": false
+        "visible": false,
+        "backgroundColor": "#202020"
       }
     ],
     "security": {
@@ -30,7 +31,7 @@
         "enable": true,
         "scope": []
       },
-      "csp": "default-src 'self'; connect-src 'self' blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: http://asset.localhost; media-src 'self' blob: asset: http://asset.localhost; frame-src 'self' blob: asset: http://asset.localhost; font-src 'self' blob: data:"
+      "csp": "default-src 'self'; connect-src 'self' blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: http://asset.localhost; media-src 'self' blob: asset: http://asset.localhost; frame-src 'self' blob: asset: http://asset.localhost; font-src 'self' blob: data: asset: http://asset.localhost"
     }
   },
   "bundle": {
@@ -39,11 +40,32 @@
     "category": "Productivity",
     "fileAssociations": [
       {
+        "ext": ["epub"],
+        "name": "EPUB 电子书",
+        "role": "Viewer",
+        "mimeType": "application/epub+zip"
+      },
+      {
         "ext": ["doc"],
         "name": "旧版 Word 文档",
         "description": "旧版 Word 二进制文档",
         "role": "Viewer",
         "mimeType": "application/msword"
+      },
+      {
+        "ext": ["ppt", "pps", "pot"],
+        "name": "旧版 PowerPoint 演示文稿",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["rtf"],
+        "name": "RTF 文档",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["ttf", "otf", "woff", "woff2"],
+        "name": "字体样张",
+        "role": "Viewer"
       },
       {
         "ext": ["docm", "docx", "dotm", "dotx"],
@@ -74,7 +96,7 @@
         "mimeType": "application/pdf"
       },
       {
-        "ext": ["apng", "avif", "bmp", "gif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "webp"],
+        "ext": ["apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"],
         "name": "图片",
         "description": "图片",
         "role": "Viewer"
@@ -92,9 +114,9 @@
         "role": "Viewer"
       },
       {
-        "ext": ["zip"],
-        "name": "ZIP 压缩包",
-        "description": "ZIP 压缩包目录",
+        "ext": ["zip", "jar", "war", "apk", "vsix", "nupkg", "tar", "tgz", "tbz2", "txz", "7z", "rar"],
+        "name": "压缩包",
+        "description": "压缩包目录",
         "role": "Viewer",
         "mimeType": "application/zip"
       },

@@ -3,6 +3,16 @@ export type ImageOverflowMode = "contain" | "scroll-x" | "scroll-y";
 export const MIN_READABLE_IMAGE_WIDTH = 520;
 export const MIN_READABLE_IMAGE_HEIGHT = 360;
 
+// Decode to the current monitor's physical-pixel budget, not a fixed 4K image.
+// Keep the existing upper bound so huge monitors/invalid values cannot cause
+// unbounded native bitmap allocations. Small source images are never upscaled.
+export function photoPreviewPixelLimit(width: number, height: number): number {
+  const longest = Math.max(width, height);
+  return Number.isFinite(longest) && longest > 0
+    ? Math.max(512, Math.min(4096, Math.ceil(longest)))
+    : 2048;
+}
+
 // A genuinely tiny, narrow bitmap should stay narrow. Scroll mode is reserved for
 // images whose cross-axis has enough source pixels to be useful at a readable size.
 const MIN_SCROLL_SOURCE_WIDTH = 320;

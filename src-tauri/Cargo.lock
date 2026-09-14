@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "quickpeek"
-version = "0.10.6"
+version = "0.10.9"
 dependencies = [
  "serde",
  "tauri",
@@ -2658,6 +2658,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "webview2-com",
  "windows",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

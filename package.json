@@ -1,9 +1,14 @@
 {
   "name": "quickpeek",
   "private": true,
-  "version": "0.10.6",
+  "version": "0.10.9",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-strip-types --test scripts/*.test.mjs",
+    "test:native": "powershell -NoProfile -File scripts/test-native.ps1",
+    "test:browser": "node scripts/test-browser.mjs",
+    "test:media": "node --experimental-strip-types --test scripts/media-lifecycle.test.mjs",
+    "test:media:browser": "node scripts/media-browser-smoke.mjs",
     "dev": "vite",
     "check": "tsc --noEmit",
     "build": "vite build",

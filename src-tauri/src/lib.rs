@@ -12,10 +12,15 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
+mod archive_directory;
 mod audio_metadata;
 mod pdf_metadata;
 #[cfg(target_os = "windows")]
 mod windows_image_renderer;
+#[cfg(target_os = "windows")]
+mod windows_loading;
+#[cfg(target_os = "windows")]
+mod windows_memory;
 #[cfg(target_os = "windows")]
 mod windows_pdf_renderer;
 #[cfg(target_os = "windows")]
@@ -23,18 +28,20 @@ mod windows_preview;
 #[cfg(target_os = "windows")]
 mod windows_preview_handler;
 #[cfg(target_os = "windows")]
+mod windows_rtf;
+#[cfg(target_os = "windows")]
 mod windows_shell_icon;
 
 const MAX_TEXT_PREVIEW_BYTES: u64 = 20 * 1024 * 1024;
 const BINARY_EXTENSIONS: &[&str] = &[
     "csv", "docm", "docx", "dotm", "dotx", "ods", "potm", "potx", "ppsm", "ppsx", "pptm", "pptx",
-    "tsv", "xls", "xlsb", "xlsm", "xlsx", "xltm", "xltx", "zip",
+    "tsv", "xls", "xlsb", "xlsm", "xlsx", "xltm", "xltx", "zip", "epub",
 ];
 
 const STREAM_EXTENSIONS: &[&str] = &[
     "aac", "apng", "avif", "bmp", "flac", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg",
     "m4a", "m4v", "mov", "mp3", "mp4", "ogg", "ogv", "opus", "pdf", "png", "svg", "wav", "webm",
-    "webp",
+    "webp", "ttf", "otf", "woff", "woff2", "tif", "tiff",
 ];
 
 const TEXT_EXTENSIONS: &[&str] = &[
@@ -320,7 +327,18 @@ fn get_initial_preview(app: AppHandle) -> Option<PreviewRequest> {
     let path = initial_preview_path()?;
     #[cfg(target_os = "windows")]
     windows_preview::set_preview_target(&app, &path);
-    preview_request(path)
+    let preview = preview_request(path)?;
+    #[cfg(target_os = "windows")]
+    windows_loading::begin(&app, preview.generation, preview_name(&preview.path));
+    Some(preview)
+}
+
+fn preview_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[tauri::command]
@@ -332,8 +350,17 @@ async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String>
     tauri::async_runtime::spawn_blocking(move || {
         let file = std::fs::File::open(&path)
             .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+        let is_epub = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
+        const MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
+        if is_epub && file.metadata().map_err(|e| e.to_string())?.len() > MAX_EPUB_BYTES {
+            return Err("EPUB 超过 64 MB 轻量预览上限".into());
+        }
         let limit = if is_text_path(&path) {
             MAX_TEXT_PREVIEW_BYTES
+        } else if is_epub {
+            MAX_EPUB_BYTES + 1
         } else {
             u64::MAX
         };
@@ -345,6 +372,9 @@ async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String>
         file.take(limit)
             .read_to_end(&mut bytes)
             .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+        if is_epub && bytes.len() as u64 > MAX_EPUB_BYTES {
+            return Err("EPUB 超过预览上限".into());
+        }
         Ok(tauri::ipc::Response::new(bytes))
     })
     .await
@@ -447,9 +477,12 @@ async fn decode_system_image(
     }
     #[cfg(target_os = "windows")]
     {
+        let generation = PREVIEW_GENERATION.load(Ordering::SeqCst);
         tauri::async_runtime::spawn_blocking(move || {
-            windows_image_renderer::decode_to_png(&path, max_dimension)
-                .map(tauri::ipc::Response::new)
+            windows_image_renderer::decode_photo_preview(&path, max_dimension, || {
+                preview_generation_is_current(generation)
+            })
+            .map(tauri::ipc::Response::new)
         })
         .await
         .map_err(|error| format!("HEIC 解码任务失败：{error}"))?
@@ -476,6 +509,77 @@ async fn read_mp3_metadata(path: String) -> Result<Option<audio_metadata::AudioM
     })
     .await
     .map_err(|error| format!("MP3 标签读取任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn read_archive_directory(
+    path: String,
+    generation: u32,
+) -> Result<archive_directory::Directory, String> {
+    let path = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || archive_directory::read(&path, generation))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn tiff_path(path: &str) -> Result<PathBuf, String> {
+    let path = validated_file_path(path)?;
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if !["tif", "tiff"].contains(&extension.as_str()) {
+        return Err("不是 TIFF 图像".into());
+    }
+    Ok(path)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn read_tiff_info(
+    path: String,
+    generation: u32,
+) -> Result<windows_image_renderer::ImageInfo, String> {
+    let path = tiff_path(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _decode = TIFF_WORK.lock().map_err(|_| "图像解码器不可用")?;
+        if !preview_generation_is_current(generation) {
+            return Err("预览已取消".into());
+        }
+        windows_image_renderer::image_info(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+static TIFF_WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+#[tauri::command]
+async fn render_tiff_page(
+    path: String,
+    page_index: u32,
+    generation: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let path = tiff_path(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _decode = TIFF_WORK.lock().map_err(|_| "图像解码器不可用")?;
+        if !preview_generation_is_current(generation) {
+            return Err("预览已取消".to_string());
+        }
+        let bytes = windows_image_renderer::decode_frame(&path, 4096, page_index)?;
+        if !preview_generation_is_current(generation) {
+            return Err("预览已取消".to_string());
+        }
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -515,9 +619,11 @@ async fn prepare_system_preview(path: String, generation: u32) -> Result<bool, S
     if !path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("doc"))
+        .is_some_and(|extension| {
+            ["doc", "ppt", "pps", "pot", "rtf"].contains(&extension.to_ascii_lowercase().as_str())
+        })
     {
-        return Err("系统预览后备目前仅用于旧版 .doc 文件".to_string());
+        return Err("此文件不在系统预览允许列表中".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || windows_preview_handler::prepare(path, generation))
         .await
@@ -539,16 +645,30 @@ fn unload_system_preview(generation: u32) -> Result<(), String> {
 }
 
 pub(crate) fn hide_preview(app: &AppHandle) {
-    PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    #[cfg(target_os = "windows")]
+    windows_memory::begin_cleanup();
+    #[cfg(target_os = "windows")]
+    windows_loading::cancel(app);
     #[cfg(target_os = "windows")]
     windows_preview::hide_window(app);
     #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
-    let _ = app.emit_to("main", "preview-hidden", ());
+    let _ = app.emit_to("main", "preview-hidden", generation);
+}
+
+#[tauri::command]
+fn preview_cleanup_complete(app: AppHandle, generation: u32) {
     #[cfg(target_os = "windows")]
-    windows_preview::schedule_low_memory(app.clone());
+    windows_memory::suspend_after_cleanup(&app, generation);
+}
+
+#[tauri::command]
+fn prepare_preview_engine(app: AppHandle) {
+    #[cfg(target_os = "windows")]
+    windows_preview::prepare_for_use(&app);
 }
 
 pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
@@ -558,22 +678,38 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
 
     #[cfg(target_os = "windows")]
     windows_preview::prepare_for_use(app);
-    #[cfg(target_os = "windows")]
-    windows_preview::set_preview_target(app, &path);
     if let Some(preview) = preview_request(path) {
+        #[cfg(target_os = "windows")]
+        windows_loading::begin(app, preview.generation, preview_name(&preview.path));
+        #[cfg(target_os = "windows")]
+        windows_preview::set_preview_target(app, Path::new(&preview.path));
         let _ = app.emit_to("main", "preview-file", preview);
     }
 }
 
 #[tauri::command]
-fn show_preview_window(app: AppHandle, generation: Option<u32>) {
+fn show_preview_window(app: AppHandle, generation: Option<u32>, title: Option<String>) {
     if generation.is_some_and(|generation| !preview_generation_is_current(generation)) {
         return;
     }
     #[cfg(target_os = "windows")]
     {
-        windows_preview::prepare_for_use(&app);
-        windows_preview::show_without_activation(&app);
+        let ui_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if generation.is_some_and(|g| !preview_generation_is_current(g)) {
+                return;
+            }
+            if let (Some(window), Some(title)) = (ui_app.get_webview_window("main"), title) {
+                let _ = window.set_title(&title);
+            }
+            // The engine was resumed before dispatching this preview. Resuming
+            // again here queues WebView visibility work after native activation,
+            // which can cover the ready Rich Edit / system preview child.
+            windows_preview::show_without_activation(&ui_app);
+            if let Some(generation) = generation {
+                windows_loading::finish(generation);
+            }
+        });
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
@@ -582,7 +718,10 @@ fn show_preview_window(app: AppHandle, generation: Option<u32>) {
 }
 
 #[tauri::command]
-fn hide_preview_window(app: AppHandle) {
+fn hide_preview_window(app: AppHandle, generation: Option<u32>) {
+    if generation.is_some_and(|g| !preview_generation_is_current(g)) {
+        return;
+    }
     hide_preview(&app);
 }
 
@@ -636,11 +775,13 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             tauri::WindowEvent::Moved(_) => {
                 windows_preview::position_open_button(window.app_handle());
+                windows_loading::reposition(window.app_handle());
             }
             #[cfg(target_os = "windows")]
             tauri::WindowEvent::Resized(_) => {
                 windows_preview::position_open_button(window.app_handle());
                 windows_preview_handler::resize();
+                windows_loading::reposition(window.app_handle());
             }
             _ => {}
         })
@@ -651,6 +792,9 @@ pub fn run() {
             read_pdf_info,
             render_pdf_page,
             decode_system_image,
+            read_tiff_info,
+            render_tiff_page,
+            read_archive_directory,
             read_mp3_metadata,
             allow_preview_asset,
             #[cfg(target_os = "windows")]
@@ -663,6 +807,8 @@ pub fn run() {
             unload_system_preview,
             show_preview_window,
             hide_preview_window,
+            preview_cleanup_complete,
+            prepare_preview_engine,
             log_frontend_error
         ])
         .run(tauri::generate_context!())
@@ -685,6 +831,7 @@ mod tests {
             r"C:\sheets\legacy.XLS",
             r"C:\media\clip.MP4",
             r"C:\archives\files.ZIP",
+            r"C:\books\novel.EPUB",
             r"C:\code\main.RS",
             r"C:\notes\readme.TXT",
             r"C:\subtitles\episode.SRT",

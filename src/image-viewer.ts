@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { imageOverflowMode, initialImageScale } from "./image-layout";
+import { imageOverflowMode, initialImageScale, photoPreviewPixelLimit } from "./image-layout";
+import { previewTask } from "./preview-task";
 
 export type ImageViewerResult = {
   readonly width: number;
@@ -12,9 +13,11 @@ export async function renderImageViewer(
   name: string,
   host: HTMLElement,
   path?: string,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<ImageViewerResult> {
   const frame = document.createElement("div");
   frame.className = "image-viewer";
+  frame.style.visibility = "hidden";
   const canvas = document.createElement("div");
   canvas.className = "image-viewer-canvas";
   const surface = document.createElement("div");
@@ -31,31 +34,40 @@ export async function renderImageViewer(
 
   let decodedUrl: string | null = null;
   const extension = name.toLocaleLowerCase().split(".").pop() ?? "";
-  if (path && isTauri() && (extension === "heic" || extension === "heif")) {
-    const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("decode_system_image", {
-      maxDimension: 4096,
-      path,
-    });
-    const source = payload instanceof ArrayBuffer
-      ? payload
-      : new Uint8Array(payload instanceof Uint8Array ? payload : payload);
-    decodedUrl = URL.createObjectURL(new Blob([source], { type: "image/png" }));
-  }
-
   try {
-    await new Promise<void>((resolve, reject) => {
+    if (path && isTauri() && (extension === "heic" || extension === "heif")) {
+      const { currentMonitor } = await import("@tauri-apps/api/window");
+      const monitor = await previewTask(currentMonitor().catch(() => null), signal);
+      const maxDimension = photoPreviewPixelLimit(
+        monitor?.workArea.size.width ?? screen.availWidth * window.devicePixelRatio,
+        monitor?.workArea.size.height ?? screen.availHeight * window.devicePixelRatio,
+      );
+      const payload = await previewTask(invoke<ArrayBuffer | Uint8Array | number[]>("decode_system_image", {
+        maxDimension,
+        path,
+      }), signal);
+      const source = payload instanceof ArrayBuffer ? payload : new Uint8Array(payload);
+      const signature = source instanceof ArrayBuffer ? new Uint8Array(source, 0, Math.min(2, source.byteLength)) : source;
+      // Native photos use JPEG; images with alpha retain PNG transparency.
+      const mime = signature[0] === 0xff && signature[1] === 0xd8 ? "image/jpeg" : "image/png";
+      decodedUrl = URL.createObjectURL(new Blob([source], { type: mime }));
+    }
+
+    await previewTask(new Promise<void>((resolve, reject) => {
       image.addEventListener("load", () => resolve(), { once: true });
       image.addEventListener("error", () => reject(new Error("图片解码失败")), { once: true });
       image.src = decodedUrl ?? url;
-    });
+    }), signal);
     if (typeof image.decode === "function") {
       try {
-        await image.decode();
+        await previewTask(image.decode(), signal);
       } catch {
         if (!image.complete || image.naturalWidth === 0) throw new Error("图片解码失败");
       }
     }
+    signal.throwIfAborted();
   } catch (error) {
+    image.removeAttribute("src");
     if (decodedUrl) URL.revokeObjectURL(decodedUrl);
     frame.remove();
     throw error;
@@ -122,6 +134,7 @@ export async function renderImageViewer(
   const resizeObserver = new ResizeObserver(scheduleInitialScale);
   resizeObserver.observe(frame);
   updateInitialScale();
+  frame.style.visibility = "";
 
   const onWheel = (event: WheelEvent): void => {
     const rawDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)

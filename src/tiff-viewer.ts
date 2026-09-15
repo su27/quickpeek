@@ -6,16 +6,16 @@ import type { RenderContext } from "./document-formats";
 export async function renderTiffViewer(path: string, generation: number, context: RenderContext) {
   const { host, signal } = context;
   const info = await previewTask(invoke<{ width: number; height: number; pageCount: number }>("read_tiff_info", { path, generation }), signal);
-  if (!info.pageCount || !info.width || !info.height) throw new Error("TIFF 页数或尺寸无效");
+  if (!info.pageCount || !info.width || !info.height) throw new Error("Invalid TIFF page count or dimensions");
   let viewer: ImageViewerResult | null = null;
   let url: string | null = null;
   let disposed = false;
   let busy = false;
   let page = 0;
   const controls = document.createElement("nav"); controls.className = "tiff-pages";
-  const previous = document.createElement("button"); previous.textContent = "上一页";
+  const previous = document.createElement("button"); previous.textContent = "Previous page";
   const label = document.createElement("span");
-  const next = document.createElement("button"); next.textContent = "下一页";
+  const next = document.createElement("button"); next.textContent = "Next page";
   controls.append(previous, label, next);
   const update = (): void => {
     label.textContent = `${page + 1}/${info.pageCount}`;
@@ -35,7 +35,7 @@ export async function renderTiffViewer(path: string, generation: number, context
       if (disposed || signal.aborted) return;
       viewer?.destroy(); if (url) URL.revokeObjectURL(url);
       viewer = candidate; candidate = null; url = newUrl; newUrl = null; page = index;
-      if (context.isActive() && info.pageCount > 1) context.setPageLabel(`${page + 1}/${info.pageCount} 页`);
+      if (context.isActive() && info.pageCount > 1) context.setPageLabel(`${page + 1}/${info.pageCount}`);
     } finally {
       candidate?.destroy(); if (newUrl) URL.revokeObjectURL(newUrl);
       busy = false; update();

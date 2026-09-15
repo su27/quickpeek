@@ -9,7 +9,35 @@ type DocumentNode = {
   type?: string;
   cssStyle?: Record<string, string>;
   children?: DocumentNode[];
+  props?: SectionLayout;
+  sectionProps?: SectionLayout;
 };
+
+type SectionLayout = {
+  pageMargins?: Record<string, string | null | undefined>;
+  pageSize?: { width?: string | null };
+};
+
+// docx-preview parses section margins as point lengths. Apply the reading
+// minimum before rendering so headers/footers use the same adjusted margins.
+function ensureReadingMargins(node: DocumentNode | undefined, isBody = false): void {
+  if (!node) return;
+  const section = isBody ? (node.props ??= {}) : node.sectionProps;
+  if (section) {
+    // Without a page width, the max-content host stretches to the longest
+    // paragraph. Give incomplete documents an A4 reading width so text wraps.
+    const size = section.pageSize ??= {};
+    if (!size.width) size.width = "595.3pt";
+    const margins = section.pageMargins ??= {};
+    for (const side of ["top", "right", "bottom", "left"]) {
+      const value = margins[side];
+      if (!value || (value.endsWith("pt") && Number.parseFloat(value) < 24)) {
+        margins[side] = "24pt";
+      }
+    }
+  }
+  for (const child of node.children ?? []) ensureReadingMargins(child);
+}
 
 function normalizeTableCellTextDirections(node: DocumentNode | undefined): number {
   if (!node) return 0;
@@ -44,6 +72,7 @@ export async function renderDocx(
   options?: Partial<Options>,
 ): Promise<WordDocument> {
   const document = await parseAsync(data, options);
+  ensureReadingMargins(document.documentPart?.body, true);
   const correctedCells = normalizeTableCellTextDirections(document.documentPart?.body);
   const nodes = await renderDocument(document, options);
 

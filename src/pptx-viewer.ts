@@ -18,7 +18,7 @@ export async function renderPptxViewer(
 ): Promise<DocumentViewerController> {
   const container = document.createElement("section");
   container.className = "pptx-viewer";
-  container.setAttribute("aria-label", "PPTX 演示文稿");
+  container.setAttribute("aria-label", "PowerPoint presentation");
   host.classList.add("is-pptx");
   host.append(container);
 
@@ -156,7 +156,7 @@ export async function renderPptxViewer(
       container.remove();
     },
     getPageLabel() {
-      return `${visibleSlideIndex(viewer.currentSlideIndex) + 1} / ${viewer.slideCount} 页`;
+      return `${visibleSlideIndex(viewer.currentSlideIndex) + 1} / ${viewer.slideCount}`;
     },
     moveMatch(delta) {
       if (matches.length === 0) return status();

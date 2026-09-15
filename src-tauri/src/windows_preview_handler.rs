@@ -70,11 +70,11 @@ fn action_queue() -> &'static Mutex<VecDeque<Action>> {
 fn post_action(action: Action) -> Result<(), String> {
     let thread_id = THREAD_ID.load(Ordering::SeqCst);
     if thread_id == 0 {
-        return Err("Windows 系统预览宿主尚未就绪".to_string());
+        return Err("Windows preview host is not ready".to_string());
     }
     action_queue()
         .lock()
-        .map_err(|_| "系统预览请求队列不可用".to_string())?
+        .map_err(|_| "System preview queue is unavailable".to_string())?
         .push_back(action);
     unsafe {
         PostThreadMessageW(
@@ -83,7 +83,7 @@ fn post_action(action: Action) -> Result<(), String> {
             Default::default(),
             Default::default(),
         )
-        .map_err(|error| format!("无法通知系统预览宿主：{error}"))?;
+        .map_err(|error| format!("Could not notify system preview host: {error}"))?;
     }
     Ok(())
 }
@@ -103,7 +103,7 @@ fn wait_for_reply(receiver: mpsc::Receiver<bool>, generation: u32) -> Result<boo
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
             Err(_) => {
                 let _ = unload(Some(generation));
-                return Err("Windows 系统预览处理器响应超时".to_string());
+                return Err("Windows preview handler timed out".to_string());
             }
         }
     }
@@ -231,7 +231,7 @@ pub fn start(parent: HWND) {
         .recv_timeout(Duration::from_secs(5))
         .unwrap_or(false)
     {
-        crate::diagnostic_log("Windows 系统预览宿主启动失败");
+        crate::diagnostic_log("Windows preview host failed to start");
     }
 }
 
@@ -254,11 +254,13 @@ impl PreviewHandlerController {
             }
             Ok(Some(_)) => false,
             Ok(None) => {
-                crate::diagnostic_log("当前系统没有为此文件注册预览处理器");
+                crate::diagnostic_log("No preview handler is registered for this file type");
                 false
             }
             Err(error) => {
-                crate::diagnostic_log(&format!("Windows 系统预览处理器无法打开文件：{error}"));
+                crate::diagnostic_log(&format!(
+                    "Windows preview handler could not open file: {error}"
+                ));
                 false
             }
         }
@@ -278,7 +280,7 @@ impl PreviewHandlerController {
             return false;
         };
         if let Err(error) = pending.show() {
-            crate::diagnostic_log(&format!("Windows 系统预览窗口无法显示：{error}"));
+            crate::diagnostic_log(&format!("Could not show Windows preview window: {error}"));
             return false;
         }
 
@@ -291,7 +293,7 @@ impl PreviewHandlerController {
     fn resize(&mut self, parent: HWND) {
         if let Some(active) = self.active.as_ref() {
             if let Err(error) = active.resize(parent, true) {
-                crate::diagnostic_log(&format!("Windows 系统预览窗口缩放失败：{error}"));
+                crate::diagnostic_log(&format!("Could not resize Windows preview window: {error}"));
             }
         }
         if let Some(pending) = self.pending.as_ref() {
@@ -397,7 +399,7 @@ impl PreviewHandlerHost {
         if !initialized {
             return Err(windows::core::Error::new(
                 windows::core::HRESULT(0x8000_4005_u32 as i32),
-                "预览处理器不支持可用的文件初始化接口",
+                "Preview handler has no supported file initialization interface",
             ));
         }
         unsafe {
@@ -452,7 +454,11 @@ impl PreviewHandlerHost {
                     } else {
                         Default::default()
                     },
-            )
+            )?;
+            if self._rtf.is_some() {
+                crate::windows_rtf::update_reading_rect(self.host_window)?;
+            }
+            Ok(())
         }
     }
 }

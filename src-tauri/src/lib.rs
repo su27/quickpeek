@@ -260,10 +260,10 @@ fn is_supported_path(path: &Path) -> bool {
 fn validated_file_path(raw_path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(raw_path);
     if !path.is_file() {
-        return Err("文件不存在或不是普通文件".to_string());
+        return Err("File does not exist or is not a regular file".to_string());
     }
     if !is_supported_path(&path) {
-        return Err("暂不支持这种文件格式".to_string());
+        return Err("This file format is not supported".to_string());
     }
     Ok(path)
 }
@@ -345,17 +345,17 @@ fn preview_name(path: &str) -> String {
 async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String> {
     let path = validated_file_path(&path)?;
     if is_stream_path(&path) {
-        return Err("这种格式应通过流式文件地址读取".to_string());
+        return Err("This format requires a streaming file URL".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
         let file = std::fs::File::open(&path)
-            .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+            .map_err(|error| format!("Could not read {}: {error}", path.to_string_lossy()))?;
         let is_epub = path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
         const MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
         if is_epub && file.metadata().map_err(|e| e.to_string())?.len() > MAX_EPUB_BYTES {
-            return Err("EPUB 超过 64 MB 轻量预览上限".into());
+            return Err("EPUB exceeds the 64 MB preview limit".into());
         }
         let limit = if is_text_path(&path) {
             MAX_TEXT_PREVIEW_BYTES
@@ -371,14 +371,14 @@ async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String>
         let mut bytes = Vec::with_capacity(usize::try_from(expected_size).unwrap_or(0));
         file.take(limit)
             .read_to_end(&mut bytes)
-            .map_err(|error| format!("无法读取 {}：{error}", path.to_string_lossy()))?;
+            .map_err(|error| format!("Could not read {}: {error}", path.to_string_lossy()))?;
         if is_epub && bytes.len() as u64 > MAX_EPUB_BYTES {
-            return Err("EPUB 超过预览上限".into());
+            return Err("EPUB exceeds the preview limit".into());
         }
         Ok(tauri::ipc::Response::new(bytes))
     })
     .await
-    .map_err(|error| format!("读取任务失败：{error}"))?
+    .map_err(|error| format!("Read operation failed: {error}"))?
 }
 
 #[tauri::command]
@@ -389,15 +389,15 @@ async fn read_pdf_dimensions(path: String) -> Result<Option<PreviewDimensions>, 
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return Err("文件不是 PDF".to_string());
+        return Err("File is not a PDF".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
         pdf_metadata::read_dimensions(&path)
             .map(|dimensions| dimensions.map(|(width, height)| PreviewDimensions { width, height }))
-            .map_err(|error| format!("无法读取 PDF 页面尺寸：{error}"))
+            .map_err(|error| format!("Could not read PDF page dimensions: {error}"))
     })
     .await
-    .map_err(|error| format!("PDF 尺寸读取任务失败：{error}"))?
+    .map_err(|error| format!("Could not read PDF dimensions: {error}"))?
 }
 
 #[tauri::command]
@@ -408,7 +408,7 @@ async fn read_pdf_info(path: String) -> Result<PdfDocumentInfo, String> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return Err("文件不是 PDF".to_string());
+        return Err("File is not a PDF".to_string());
     }
     #[cfg(target_os = "windows")]
     {
@@ -421,12 +421,12 @@ async fn read_pdf_info(path: String) -> Result<PdfDocumentInfo, String> {
             })
         })
         .await
-        .map_err(|error| format!("PDF 信息读取任务失败：{error}"))?
+        .map_err(|error| format!("Could not read PDF information: {error}"))?
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = path;
-        Err("当前系统不支持原生 PDF 预览".to_string())
+        Err("PDF preview is not supported on this system".to_string())
     }
 }
 
@@ -442,7 +442,7 @@ async fn render_pdf_page(
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return Err("文件不是 PDF".to_string());
+        return Err("File is not a PDF".to_string());
     }
     #[cfg(target_os = "windows")]
     {
@@ -451,12 +451,12 @@ async fn render_pdf_page(
                 .map(tauri::ipc::Response::new)
         })
         .await
-        .map_err(|error| format!("PDF 页面渲染任务失败：{error}"))?
+        .map_err(|error| format!("PDF page rendering failed: {error}"))?
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (path, page_index, target_width);
-        Err("当前系统不支持原生 PDF 预览".to_string())
+        Err("PDF preview is not supported on this system".to_string())
     }
 }
 
@@ -473,7 +473,7 @@ async fn decode_system_image(
             extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
         })
     {
-        return Err("文件不是 HEIC/HEIF 图像".to_string());
+        return Err("File is not a HEIC/HEIF image".to_string());
     }
     #[cfg(target_os = "windows")]
     {
@@ -485,12 +485,12 @@ async fn decode_system_image(
             .map(tauri::ipc::Response::new)
         })
         .await
-        .map_err(|error| format!("HEIC 解码任务失败：{error}"))?
+        .map_err(|error| format!("HEIC decoding failed: {error}"))?
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (path, max_dimension);
-        Err("当前系统不支持原生 HEIC 预览".to_string())
+        Err("HEIC preview is not supported on this system".to_string())
     }
 }
 
@@ -502,13 +502,13 @@ async fn read_mp3_metadata(path: String) -> Result<Option<audio_metadata::AudioM
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
     {
-        return Err("文件不是 MP3".to_string());
+        return Err("File is not an MP3".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        audio_metadata::read(&path).map_err(|error| format!("无法读取 MP3 标签：{error}"))
+        audio_metadata::read(&path).map_err(|error| format!("Could not read MP3 tags：{error}"))
     })
     .await
-    .map_err(|error| format!("MP3 标签读取任务失败：{error}"))?
+    .map_err(|error| format!("Could not read MP3 tags: {error}"))?
 }
 
 #[tauri::command]
@@ -533,7 +533,7 @@ fn tiff_path(path: &str) -> Result<PathBuf, String> {
         .to_string_lossy()
         .to_ascii_lowercase();
     if !["tif", "tiff"].contains(&extension.as_str()) {
-        return Err("不是 TIFF 图像".into());
+        return Err("File is not a TIFF image".into());
     }
     Ok(path)
 }
@@ -546,9 +546,9 @@ async fn read_tiff_info(
 ) -> Result<windows_image_renderer::ImageInfo, String> {
     let path = tiff_path(&path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let _decode = TIFF_WORK.lock().map_err(|_| "图像解码器不可用")?;
+        let _decode = TIFF_WORK.lock().map_err(|_| "Image decoder unavailable")?;
         if !preview_generation_is_current(generation) {
-            return Err("预览已取消".into());
+            return Err("Preview cancelled".into());
         }
         windows_image_renderer::image_info(&path)
     })
@@ -568,13 +568,13 @@ async fn render_tiff_page(
 ) -> Result<tauri::ipc::Response, String> {
     let path = tiff_path(&path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let _decode = TIFF_WORK.lock().map_err(|_| "图像解码器不可用")?;
+        let _decode = TIFF_WORK.lock().map_err(|_| "Image decoder unavailable")?;
         if !preview_generation_is_current(generation) {
-            return Err("预览已取消".to_string());
+            return Err("Preview cancelled".to_string());
         }
         let bytes = windows_image_renderer::decode_frame(&path, 4096, page_index)?;
         if !preview_generation_is_current(generation) {
-            return Err("预览已取消".to_string());
+            return Err("Preview cancelled".to_string());
         }
         Ok(tauri::ipc::Response::new(bytes))
     })
@@ -586,11 +586,11 @@ async fn render_tiff_page(
 fn allow_preview_asset(path: String, app: AppHandle) -> Result<(), String> {
     let path = validated_file_path(&path)?;
     if !is_stream_path(&path) {
-        return Err("这种格式不允许通过资源协议读取".to_string());
+        return Err("This format cannot be read through the asset protocol".to_string());
     }
     app.asset_protocol_scope()
         .allow_file(&path)
-        .map_err(|error| format!("无法授权预览文件：{error}"))
+        .map_err(|error| format!("Could not grant access to the preview file: {error}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -598,15 +598,15 @@ fn allow_preview_asset(path: String, app: AppHandle) -> Result<(), String> {
 async fn read_shell_icon(path: String) -> Result<tauri::ipc::Response, String> {
     let path = PathBuf::from(path);
     if !path.is_file() && !path.is_dir() {
-        return Err("文件或文件夹不存在".to_string());
+        return Err("File or folder does not exist".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
         windows_shell_icon::read(&path)
             .map(tauri::ipc::Response::new)
-            .map_err(|error| format!("无法读取 Windows 文件图标：{error}"))
+            .map_err(|error| format!("Could not read the Windows file icon: {error}"))
     })
     .await
-    .map_err(|error| format!("图标读取任务失败：{error}"))?
+    .map_err(|error| format!("Could not read file icon: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -614,7 +614,7 @@ async fn read_shell_icon(path: String) -> Result<tauri::ipc::Response, String> {
 async fn prepare_system_preview(path: String, generation: u32) -> Result<bool, String> {
     let path = PathBuf::from(path);
     if !path.is_file() {
-        return Err("文件不存在或不是普通文件".to_string());
+        return Err("File does not exist or is not a regular file".to_string());
     }
     if !path
         .extension()
@@ -623,11 +623,11 @@ async fn prepare_system_preview(path: String, generation: u32) -> Result<bool, S
             ["doc", "ppt", "pps", "pot", "rtf"].contains(&extension.to_ascii_lowercase().as_str())
         })
     {
-        return Err("此文件不在系统预览允许列表中".to_string());
+        return Err("This file type is not supported by system preview".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || windows_preview_handler::prepare(path, generation))
         .await
-        .map_err(|error| format!("系统预览准备任务失败：{error}"))?
+        .map_err(|error| format!("Could not prepare system preview: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -635,7 +635,7 @@ async fn prepare_system_preview(path: String, generation: u32) -> Result<bool, S
 async fn activate_system_preview(generation: u32) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || windows_preview_handler::activate(generation))
         .await
-        .map_err(|error| format!("系统预览激活任务失败：{error}"))?
+        .map_err(|error| format!("Could not activate system preview: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -688,7 +688,12 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
 }
 
 #[tauri::command]
-fn show_preview_window(app: AppHandle, generation: Option<u32>, title: Option<String>) {
+fn show_preview_window(
+    app: AppHandle,
+    generation: Option<u32>,
+    title: Option<String>,
+    native_preview: Option<bool>,
+) {
     if generation.is_some_and(|generation| !preview_generation_is_current(generation)) {
         return;
     }
@@ -706,6 +711,7 @@ fn show_preview_window(app: AppHandle, generation: Option<u32>, title: Option<St
             // again here queues WebView visibility work after native activation,
             // which can cover the ready Rich Edit / system preview child.
             windows_preview::show_without_activation(&ui_app);
+            windows_memory::present(&ui_app, generation, native_preview.unwrap_or(false));
             if let Some(generation) = generation {
                 windows_loading::finish(generation);
             }
@@ -731,10 +737,10 @@ fn log_frontend_error(message: String) {
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let quit_item = MenuItem::with_id(app, "quit", "退出 QuickPeek", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit QuickPeek", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
     let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("QuickPeek · 在资源管理器中按空格预览")
+        .tooltip("QuickPeek · Press Space in File Explorer to preview")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {

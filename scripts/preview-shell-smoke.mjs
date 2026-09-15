@@ -1,12 +1,27 @@
 // Real built frontend, isolated headless Edge. Does not interact with the desktop.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join, resolve, extname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import JSZip from 'jszip';
+const marginFixtures = new Map();
+const marginCases = [['zero', 32, 2], ['missing', 32, 2], ['normal', 96, 2]];
+for (const [name, margin] of [['zero', '0'], ['normal', '1440'], ['missing', null]]) {
+  const zip = await JSZip.loadAsync(readFileSync(new URL('../fixtures/documents/sample.docx', import.meta.url)));
+  const xml = await zip.file('word/document.xml').async('string');
+  zip.file('word/document.xml', xml.replace(/<w:pgMar\b[^>]*\/>/g, margin === null ? ''
+    : `<w:pgMar w:top="${margin}" w:right="${margin}" w:bottom="${margin}" w:left="${margin}" w:header="0" w:footer="0" w:gutter="0"/>`));
+  marginFixtures.set(`/fixture-${name}.docx`, await zip.generateAsync({type: 'nodebuffer'}));
+}
+if (process.env.QUICKPEEK_DOCX_FIXTURE) {
+  marginFixtures.set('/fixture-real.docx', readFileSync(process.env.QUICKPEEK_DOCX_FIXTURE));
+  marginCases.push(['real', 32, 1]);
+}
 const root = resolve('dist');
 const server = createServer((req, res) => {
+  if (marginFixtures.has(req.url)) { res.end(marginFixtures.get(req.url)); return; }
   const path = resolve(root, '.' + (req.url === '/' ? '/index.html' : req.url));
   if (!path.startsWith(root + sep)) { res.writeHead(403).end(); return; }
   try {
@@ -40,6 +55,8 @@ try {
   const result = await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, timeout: 15000, expression: `(async () => {
     const assert = (value, message) => { if (!value) throw new Error(message); };
     const workspace = document.querySelector('#workspace');
+    assert(document.documentElement.lang === 'en', 'page language is not English');
+    assert(document.querySelector('#searchInput').placeholder === 'Find in document', 'search prompt is not English');
     assert(!document.querySelector('#emptyState, #emptyOpenButton, .empty-state'), 'retired welcome page retained');
     assert(!document.body.innerText.includes('选择文件'), 'visible file-picker prompt');
     assert(getComputedStyle(workspace).backgroundColor === 'rgb(32, 32, 32)', 'idle surface is not dark');
@@ -54,9 +71,37 @@ try {
       assert(getComputedStyle(document.querySelector('#documentViewport')).display === 'block', 'committed preview hidden');
       assert(!document.querySelector('.empty-state'), 'welcome page returned during switch');
     }
-    return { retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true };
+    for (const [variant, padding, minimumPages] of ${JSON.stringify(marginCases)}) {
+      const name = variant + '.docx';
+      const bytes = await fetch('/fixture-' + name).then(response => response.arrayBuffer());
+      const transfer = new DataTransfer(); transfer.items.add(new File([bytes], name));
+      const input = document.querySelector('#fileInput'); input.files = transfer.files; input.dispatchEvent(new Event('change'));
+      const deadline = performance.now() + 10000;
+      while (!document.title.startsWith(name) || !document.querySelector('section.docx')) {
+        if (performance.now() > deadline) throw new Error('DOCX did not commit: ' + name);
+        await new Promise(requestAnimationFrame);
+      }
+      const pages = [...document.querySelectorAll('section.docx')];
+      assert(pages.length >= minimumPages, 'DOCX sample lost its pages');
+      for (const page of pages) {
+        const style = getComputedStyle(page);
+        for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
+          assert(Math.abs(parseFloat(style['padding' + side]) - padding) < 0.1, name + ' incorrect ' + side + ' margin');
+        }
+        assert(page.innerText.trim().length > 0, 'DOCX page lost its text');
+        assert(page.getBoundingClientRect().width < 900, 'missing page width stretched the paragraph');
+      }
+    }
+    return { retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true,
+      docxZeroAndMissingMargins: true, docxOriginalMarginsPreserved: true };
   })()` });
   assert.ok(!result.error && !result.result.exceptionDetails, JSON.stringify(result));
   console.log(result.result.result.value);
+  if (process.env.QUICKPEEK_DOCX_SCREENSHOT) {
+    await send('Runtime.evaluate', {expression: "document.querySelector('#documentViewport').scrollTo(0, 0)"});
+    await send('Emulation.setDeviceMetricsOverride', {width: 1000, height: 900, deviceScaleFactor: 1, mobile: false});
+    const screenshot = await send('Page.captureScreenshot', {format: 'png'});
+    writeFileSync(process.env.QUICKPEEK_DOCX_SCREENSHOT, Buffer.from(screenshot.result.data, 'base64'));
+  }
   void send('Browser.close');
 } finally { socket?.close(); edge.kill(); server.closeAllConnections(); server.close(); }

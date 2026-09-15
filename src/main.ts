@@ -107,7 +107,7 @@ function compactPageLabel(label: string): string {
 
 function updateWindowTitle(): void {
   const title = activeDocument
-    ? `${activeDocument.name} - ${activeDocument.isDirectory ? "文件夹" : formatBytes(activeDocument.size)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
+    ? `${activeDocument.name} - ${activeDocument.isDirectory ? "Folder" : formatBytes(activeDocument.size)}${currentPageLabel ? ` ${currentPageLabel}` : ""}`
     : "QuickPeek";
   if (title === lastWindowTitle) return;
 
@@ -119,7 +119,7 @@ function updateWindowTitle(): void {
         if (lastWindowTitle !== title) return;
         return getCurrentWindow().setTitle(title);
       })
-      .catch((error) => console.warn("无法更新窗口标题", error));
+      .catch((error) => console.warn("Could not update window title", error));
   }
 }
 
@@ -266,7 +266,7 @@ async function resizeWindowForPreview(
     await nextPaint(signal);
     return targetSize;
   } catch (error) {
-    console.warn("无法自动调整预览窗口", error);
+    console.warn("Could not resize preview window", error);
     return null;
   }
 }
@@ -452,7 +452,7 @@ function updatePageIndicator(): void {
     if (previousDistance < currentDistance) nearestPage = low - 1;
   }
 
-  setPageLabel(`${nearestPage + 1}/${pages.length} 页`);
+  setPageLabel(`${nearestPage + 1}/${pages.length}`);
 }
 
 function schedulePageIndicatorUpdate(): void {
@@ -573,7 +573,7 @@ async function loadPreview(
 
     if (format.kind === "docx") {
       const pages = countDocxPages();
-      setPageLabel(pages > 0 ? `1/${pages} 页` : "0/0 页");
+      setPageLabel(pages > 0 ? `1/${pages}` : "0/0");
     } else {
       updatePageIndicator();
     }
@@ -592,13 +592,13 @@ async function loadPreview(
     discardStagedDocument(host, rendered);
     if (!activeDocument) {
       resetViewer();
-      setPageLabel("打开失败");
+      setPageLabel("Could not open");
     } else {
       setControlsEnabled(true);
       configureControlsForFormat(activeDocument.format);
     }
     if (showFailureToast) {
-      showToast("文件打开失败，请确认文件未损坏且格式受支持", "error");
+      showToast("Could not open this file. It may be damaged or unsupported.", "error");
     }
     return false;
   } finally {
@@ -745,7 +745,11 @@ async function loadDocumentFromPath(
     false,
   );
   if (loaded) {
-    await invoke("show_preview_window", { generation, title: document.title });
+    await invoke("show_preview_window", {
+      generation,
+      title: document.title,
+      nativePreview: format.kind === "system",
+    });
     if (request === loadSequence) activeDocument?.rendered.start?.();
     return;
   }
@@ -890,7 +894,7 @@ function performSearch(): void {
   }
 
   if (!HighlightClass || !highlightRegistry) {
-    searchCount.textContent = "不可用";
+    searchCount.textContent = "Unavailable";
     return;
   }
 
@@ -971,7 +975,7 @@ workspace.addEventListener("drop", (event) => {
   dragDepth = 0;
   workspace.classList.remove("is-dragging");
   const files = Array.from(event.dataTransfer?.files ?? []);
-  if (files.length > 1) showToast("一次只会打开第一个受支持的文件");
+  if (files.length > 1) showToast("Only the first supported file will be opened");
   if (files[0]) void loadFile(files[0], nextLoadSequence()).then((loaded) => { if (loaded) activeDocument?.rendered.start?.(); });
 });
 
@@ -997,7 +1001,7 @@ document.addEventListener("keydown", (event) => {
   } else if (key === "p" && activeDocument) {
     event.preventDefault();
     if (activeDocument.format.kind === "docx") window.print();
-    else showToast("当前格式暂不支持打印");
+    else showToast("Printing is not available for this format");
   }
 }, { capture: true });
 

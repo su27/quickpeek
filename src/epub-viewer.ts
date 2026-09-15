@@ -38,21 +38,21 @@ async function chapterContent(book: EpubBook, index: number, signal: AbortSignal
   const chapter = book.chapters[index];
   const xml = await book.readXml(chapter.path, signal);
   const body = elements(xml, "body")[0];
-  if (!body) throw new Error("此章节没有可阅读的正文");
+  if (!body) throw new Error("This chapter has no readable content");
   const article = document.createElement("article"); article.className = "epub-prose";
   const anchors = new Map<string, HTMLElement>();
   const urls: string[] = [];
   const images: Array<{ image: HTMLImageElement; path: string }> = [];
   let nodeCount = 0;
   const copy = (source: Node, target: Node, depth: number): void => {
-    if (++nodeCount > 35000 || depth > 80) throw new Error("章节结构超过轻量预览上限");
+    if (++nodeCount > 35000 || depth > 80) throw new Error("This chapter is too complex to preview");
     if (source.nodeType === Node.TEXT_NODE) { target.appendChild(document.createTextNode(source.textContent ?? "")); return; }
     if (!(source instanceof Element)) return;
     const tag = source.localName.toLowerCase();
     if (DROP_TAGS.has(tag)) return;
     if (tag === "img" || tag === "image") {
       const image = document.createElement("img");
-      image.alt = source.getAttribute("alt") || "书内插图";
+      image.alt = source.getAttribute("alt") || "Book illustration";
       image.loading = "lazy"; image.decoding = "async";
       const link = bookLink(chapter.path, source.getAttribute("src") ?? source.getAttribute("href") ?? source.getAttributeNS("http://www.w3.org/1999/xlink", "href") ?? "");
       if (link && book.images.has(link.path) && images.length < 32) images.push({ image, path: link.path });
@@ -70,7 +70,7 @@ async function chapterContent(book: EpubBook, index: number, signal: AbortSignal
       const link = bookLink(chapter.path, href);
       if (link && book.chapters.some(item => item.path === link.path)) {
         result.setAttribute("href", "#"); result.dataset.bookPath = link.path; result.dataset.bookFragment = link.fragment;
-      } else if (href) result.title = "预览中不打开外部链接";
+      } else if (href) result.title = "External links are disabled in preview";
     }
     target.appendChild(result);
     for (const child of source.childNodes) copy(child, result, depth + 1);
@@ -93,7 +93,7 @@ async function chapterContent(book: EpubBook, index: number, signal: AbortSignal
     }
     for (const image of article.querySelectorAll("img:not([src])")) {
       const missing = document.createElement("span"); missing.className = "epub-image-note";
-      missing.textContent = `[${image.getAttribute("alt")} · 无法预览此插图]`; image.replaceWith(missing);
+      missing.textContent = `[${image.getAttribute("alt")} · Image unavailable]`; image.replaceWith(missing);
     }
     const heading = article.querySelector("h1,h2,h3")?.textContent?.trim().slice(0,200);
     return { article, anchors, heading, destroy() { article.remove(); for (const url of urls) URL.revokeObjectURL(url); anchors.clear(); } };
@@ -106,15 +106,15 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
   const frame = document.createElement("section"); frame.className = "epub-viewer";
   const toolbar = document.createElement("div"); toolbar.className = "epub-toolbar";
   const menu = document.createElement("details"); menu.className = "epub-menu";
-  const toggle = document.createElement("summary"); toggle.textContent = "目录";
-  const list = document.createElement("nav"); list.setAttribute("aria-label", "章节目录");
+  const toggle = document.createElement("summary"); toggle.textContent = "Contents";
+  const list = document.createElement("nav"); list.setAttribute("aria-label", "Table of contents");
   menu.append(toggle, list);
   const position = document.createElement("span"); position.className = "epub-position";
-  const previous = document.createElement("button"); previous.textContent = "上一章";
-  const next = document.createElement("button"); next.textContent = "下一章";
+  const previous = document.createElement("button"); previous.textContent = "Previous chapter";
+  const next = document.createElement("button"); next.textContent = "Next chapter";
   toolbar.append(menu, position, previous, next);
   const heading = document.createElement("header"); heading.className = "epub-book-heading";
-  const kicker = document.createElement("span"); kicker.textContent = "电子书";
+  const kicker = document.createElement("span"); kicker.textContent = "Ebook";
   const title = document.createElement("h1"); title.textContent = book.title;
   const author = document.createElement("p"); author.textContent = book.author;
   heading.append(kicker, title); if (book.author) heading.append(author);
@@ -128,10 +128,10 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
   const buttons: HTMLButtonElement[] = [];
   const update = (): void => {
     heading.hidden = page > 0;
-    position.textContent = `${page + 1} / ${count} 章`;
+    position.textContent = `${page + 1} / ${count} chapters`;
     previous.disabled = page === 0; next.disabled = page + 1 >= count;
     for (const [index, button] of buttons.entries()) button.setAttribute("aria-current", index === page ? "true" : "false");
-    if (context.isActive()) context.setPageLabel(`${page + 1}/${count} 章`);
+    if (context.isActive()) context.setPageLabel(`${page + 1}/${count} chapters`);
   };
   const jump = (fragment: string): void => {
     if (fragment) current?.anchors.get(fragment)?.scrollIntoView({ block: "start" });
@@ -147,14 +147,14 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
       if (disposed || request !== sequence) { replacement.destroy(); return; }
       if (context.isActive()) context.contentChanged?.();
       current?.destroy(); current = replacement; page = index;
-      if (replacement.heading && /^第 \d+ 节$/.test(book.chapters[index].title)) {
+      if (replacement.heading && /^Chapter \d+$/.test(book.chapters[index].title)) {
         book.chapters[index].title = replacement.heading; buttons[index].textContent = replacement.heading;
       }
       content.replaceChildren(replacement.article); menu.open = false; update(); if (context.isActive()) jump(fragment);
     } catch (error) {
       if (disposed || cancellation.signal.aborted) return;
       if (!current) throw error;
-      errorNotice.textContent = error instanceof Error ? error.message : "章节打开失败"; errorNotice.hidden = false;
+      errorNotice.textContent = error instanceof Error ? error.message : "Could not open chapter"; errorNotice.hidden = false;
     } finally { if (pending === cancellation) pending = null; }
   };
   const navigate = (index: number, fragment = ""): void => { void show(index, fragment); };
@@ -182,5 +182,5 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
     signal.throwIfAborted(); await show(0); signal.throwIfAborted();
     host.classList.add("is-epub"); host.append(frame);
   } catch (error) { destroy(); throw error; }
-  return { get label() { return `${page + 1}/${count} 章`; }, destroy };
+  return { get label() { return `${page + 1}/${count} chapters`; }, destroy };
 }

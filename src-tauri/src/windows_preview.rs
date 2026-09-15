@@ -327,7 +327,7 @@ fn preview_path_store() -> &'static Mutex<Option<PathBuf>> {
 
 fn default_application_name(path: &std::path::Path) -> Option<String> {
     if path.is_dir() {
-        return Some("文件资源管理器".to_string());
+        return Some("File Explorer".to_string());
     }
     let extension = path.extension()?.to_str()?;
     let association = HSTRING::from(format!(".{extension}"));
@@ -384,7 +384,7 @@ fn open_current_preview_with_default_application() {
         )
     };
     if result.0 as isize <= 32 {
-        crate::diagnostic_log("Windows 默认程序无法打开当前预览目标");
+        crate::diagnostic_log("The default Windows app could not open this file");
     }
 }
 
@@ -643,7 +643,7 @@ fn install_open_button(preview_window: HWND) {
         )
     };
     let Ok(button) = button else {
-        crate::diagnostic_log("无法创建标题栏默认程序按钮");
+        crate::diagnostic_log("Could not create the default-app title bar button");
         return;
     };
     let original = unsafe {
@@ -753,7 +753,9 @@ unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
         )
     };
     if selection_hook.0.is_null() {
-        crate::diagnostic_log("无法监听文件选择变化；方向键预览仍可使用");
+        crate::diagnostic_log(
+            "Could not watch selection changes; arrow-key preview remains available",
+        );
     }
     let mut message = MSG::default();
     let mut refresh_timer_id: Option<usize> = None;
@@ -833,7 +835,7 @@ pub fn start(app: AppHandle) {
     }
     std::thread::spawn(move || {
         if let Err(error) = unsafe { run_hook_loop(app) } {
-            eprintln!("无法启动空格预览监听：{error}");
+            eprintln!("Could not start the Space-key preview hook: {error}");
         }
     });
 }
@@ -885,10 +887,12 @@ pub fn show_without_activation(app: &AppHandle) {
     // Keep Tauri/tao's own window state in sync with the native z-order. Without
     // this, a later first-frame window update may restore tao's stale non-topmost state.
     if let Err(error) = window.set_always_on_top(true) {
-        crate::diagnostic_log(&format!("无法同步预览窗口置顶状态：{error}"));
+        crate::diagnostic_log(&format!(
+            "Could not update preview window topmost state: {error}"
+        ));
     }
     if let Err(error) = raise_preview_window(window_handle) {
-        crate::diagnostic_log(&format!("无法显示并置顶预览窗口：{error}"));
+        crate::diagnostic_log(&format!("Could not show and raise preview window: {error}"));
     }
     // The caption button is a separately-owned popup and must be the final
     // z-order operation; raising the owner afterwards can hide it until activation.
@@ -958,7 +962,7 @@ pub fn hide_window(app: &AppHandle) {
         }
     }
     if let Err(error) = crate::windows_preview_handler::unload(None) {
-        crate::diagnostic_log(&format!("系统预览处理器卸载请求失败：{error}"));
+        crate::diagnostic_log(&format!("Could not unload system preview handler: {error}"));
     }
     let Some(window) = app.get_webview_window("main") else {
         return;

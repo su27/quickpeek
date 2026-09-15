@@ -68,7 +68,7 @@ unsafe fn bitmap_rgba(
     if width == 0 || height == 0 || width > 512 || height > 512 {
         return Err(windows::core::Error::new(
             windows::core::HRESULT(0x8000_4005_u32 as i32),
-            "Windows Shell 返回了无效的图标尺寸",
+            "Windows Shell returned invalid icon dimensions",
         ));
     }
 
@@ -83,7 +83,7 @@ unsafe fn bitmap_rgba(
         .ok_or_else(|| {
             windows::core::Error::new(
                 windows::core::HRESULT(0x8007_000E_u32 as i32),
-                "Windows Shell 图标过大",
+                "Windows Shell icon is too large",
             )
         })?;
     let mut bgra = vec![0_u8; pixel_count];

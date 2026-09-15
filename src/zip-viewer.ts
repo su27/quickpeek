@@ -36,10 +36,10 @@ export function renderArchiveDirectory(
   frame.className = "zip-viewer";
   const summary = document.createElement("div");
   summary.className = "zip-viewer-summary";
-  summary.textContent = `${rows.length - folders} 个文件，${folders} 个文件夹${truncated ? "（目录过大，仅显示部分内容）" : ""}`;
+  summary.textContent = `${rows.length - folders} files, ${folders} folders${truncated ? " (large archive; showing partial contents)" : ""}`;
   const header = document.createElement("div");
   header.className = "zip-viewer-header";
-  for (const label of ["名称", "原始大小", "压缩后", "修改时间"]) {
+  for (const label of ["Name", "Original size", "Compressed", "Modified"]) {
     const cell = document.createElement("span");
     cell.textContent = label;
     header.append(cell);
@@ -86,7 +86,7 @@ export function renderArchiveDirectory(
     if (entry.dateParts) {
       const [year, month, day, hour, minute, second] = entry.dateParts;
       const modified = new Date(year, month - 1, day, hour, minute, second);
-      if (!Number.isNaN(modified.getTime())) { date.dateTime = modified.toISOString(); date.textContent = modified.toLocaleString(); }
+      if (!Number.isNaN(modified.getTime())) { date.dateTime = modified.toISOString(); date.textContent = modified.toLocaleString("en-US"); }
     }
     label.append(toggle, icon, name);
     item.append(label, originalSize, compressedSize, date);

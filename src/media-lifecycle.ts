@@ -9,7 +9,7 @@ export function createMediaSession(
   let started = false;
   let cancelMetadata: (() => void) | undefined;
   let playbackTimer: ReturnType<typeof setTimeout> | undefined;
-  const message = "无法播放：系统不支持此音视频编码，或加载已超时。可使用标题栏的默认程序打开。";
+  const message = "Playback failed or timed out. This codec may not be supported. Use the app button in the title bar to open the file.";
   function dispose(): void {
     if (disposed) return;
     disposed = true;
@@ -31,7 +31,7 @@ export function createMediaSession(
   if (signal.aborted) dispose();
   function load(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      if (disposed) { reject(new DOMException("预览已取消", "AbortError")); return; }
+      if (disposed) { reject(new DOMException("Preview cancelled", "AbortError")); return; }
       const cleanup = (): void => {
         clearTimeout(timer);
         media.removeEventListener("loadedmetadata", loaded);
@@ -40,7 +40,7 @@ export function createMediaSession(
       };
       const loaded = (): void => { cleanup(); resolve(); };
       const error = (): void => { cleanup(); dispose(); reject(new Error(message)); };
-      cancelMetadata = () => { cleanup(); reject(new DOMException("预览已取消", "AbortError")); };
+      cancelMetadata = () => { cleanup(); reject(new DOMException("Preview cancelled", "AbortError")); };
       const timer = setTimeout(error, timeoutMs);
       // <source> errors do not reliably propagate to the media element.
       media.addEventListener("loadedmetadata", loaded, { once: true });

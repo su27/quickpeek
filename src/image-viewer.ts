@@ -55,14 +55,14 @@ export async function renderImageViewer(
 
     await previewTask(new Promise<void>((resolve, reject) => {
       image.addEventListener("load", () => resolve(), { once: true });
-      image.addEventListener("error", () => reject(new Error("图片解码失败")), { once: true });
+      image.addEventListener("error", () => reject(new Error("Could not decode image")), { once: true });
       image.src = decodedUrl ?? url;
     }), signal);
     if (typeof image.decode === "function") {
       try {
         await previewTask(image.decode(), signal);
       } catch {
-        if (!image.complete || image.naturalWidth === 0) throw new Error("图片解码失败");
+        if (!image.complete || image.naturalWidth === 0) throw new Error("Could not decode image");
       }
     }
     signal.throwIfAborted();

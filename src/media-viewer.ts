@@ -38,7 +38,7 @@ async function loadAudioMetadata(name: string, path: string | undefined): Promis
   try {
     return await invoke<AudioMetadata | null>("read_mp3_metadata", { path });
   } catch (error) {
-    console.warn("无法读取 MP3 标签", error);
+    console.warn("Could not read MP3 tags", error);
     return null;
   }
 }
@@ -136,12 +136,12 @@ export async function renderAudioViewer(
         artist.title = metadata.artist;
         title.after(artist);
       }
-      appendAudioDetail(details, "专辑", metadata?.album);
-      appendAudioDetail(details, "年份", metadata?.year);
-      appendAudioDetail(details, "音轨", metadata?.track);
-      appendAudioDetail(details, "流派", metadata?.genre);
-      appendAudioDetail(details, "作曲", metadata?.composer);
-      appendAudioDetail(details, "时长", formatDuration(audio.duration));
+      appendAudioDetail(details, "Album", metadata?.album);
+      appendAudioDetail(details, "Year", metadata?.year);
+      appendAudioDetail(details, "Track", metadata?.track);
+      appendAudioDetail(details, "Genre", metadata?.genre);
+      appendAudioDetail(details, "Composer", metadata?.composer);
+      appendAudioDetail(details, "Duration", formatDuration(audio.duration));
       if (details.childElementCount > 0) audio.before(details);
     });
   } catch (error) {

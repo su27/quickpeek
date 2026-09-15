@@ -11,7 +11,7 @@ export async function renderFontViewer(url: string, name: string, host: HTMLElem
   title.textContent = name;
   const hint = document.createElement("p");
   hint.className = "font-viewer-hint";
-  hint.textContent = "Aa · 字体样张（字体缺少的字符由系统字体补齐）";
+  hint.textContent = "Aa · Font preview (missing characters use a system font)";
   frame.append(title, hint);
   for (const size of [18, 24, 36, 60]) {
     const row = document.createElement("div");
@@ -20,7 +20,7 @@ export async function renderFontViewer(url: string, name: string, host: HTMLElem
     const sample = document.createElement("p");
     sample.style.fontFamily = `"${family}", sans-serif`;
     sample.style.fontSize = `${size}px`;
-    sample.textContent = "The quick brown fox jumps over the lazy dog.\n天地玄黄，宇宙洪荒。0123456789 !? @#%&";
+    sample.textContent = "The quick brown fox jumps over the lazy dog.\nABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789 !? @#%&";
     row.append(label, sample); frame.append(row);
   }
   document.fonts.add(face);

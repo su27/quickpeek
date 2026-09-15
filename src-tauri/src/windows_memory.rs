@@ -46,6 +46,25 @@ pub fn resume(app: &AppHandle) {
     }
 }
 
+/// HWND z-order alone does not occlude WebView2's composited surface. Hide the
+/// browser only after the frontend has committed and finished its paint barrier;
+/// hiding it earlier can stall requestAnimationFrame and prevent the commit.
+/// Keep the engine running so IPC/cleanup still works; resume() restores the
+/// browser before the next file is dispatched, including native-preview fallback.
+pub fn present(app: &AppHandle, generation: Option<u32>, native_preview: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.with_webview(move |webview| {
+            if generation.is_some_and(|id| !crate::preview_generation_is_current(id)) {
+                return;
+            }
+            if let Err(error) = unsafe { webview.controller().SetIsVisible(!native_preview) } {
+                crate::diagnostic_log(&format!("WebView presentation failed: {error}"));
+            }
+            crate::windows_preview_handler::resize();
+        });
+    }
+}
+
 fn still_idle(generation: u32, epoch: u32) -> bool {
     IDLE_REQUESTED.load(Ordering::SeqCst)
         && crate::preview_generation_is_current(generation)

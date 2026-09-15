@@ -12,17 +12,17 @@ function validateContainer(bytes: ArrayBuffer): void {
   for (let at = bytes.byteLength - 22; at >= Math.max(0, bytes.byteLength - 65557); at--) {
     if (data.getUint32(at, true) === 0x06054b50 && at + 22 + data.getUint16(at + 20, true) === bytes.byteLength) { end = at; break; }
   }
-  if (end < 0) throw new Error("EPUB 不是完整的 ZIP 容器");
+  if (end < 0) throw new Error("EPUB is not a complete ZIP archive");
   const count = data.getUint16(end + 10, true), size = data.getUint32(end + 12, true), offset = data.getUint32(end + 16, true);
-  if (data.getUint16(end + 4, true) || data.getUint16(end + 6, true) || count > 12000 || size === 0xffffffff || offset === 0xffffffff) throw new Error("EPUB 文件数量超过上限，或使用了不支持的分卷/ZIP64 容器");
-  if (offset + size > end) throw new Error("EPUB 目录范围无效");
+  if (data.getUint16(end + 4, true) || data.getUint16(end + 6, true) || count > 12000 || size === 0xffffffff || offset === 0xffffffff) throw new Error("EPUB has too many entries or uses an unsupported split or ZIP64 archive");
+  if (offset + size > end) throw new Error("Invalid EPUB directory bounds");
   let found = 0;
   for (let at = offset; at < offset + size;) {
-    if (at + 46 > offset + size || data.getUint32(at, true) !== 0x02014b50 || ++found > 12000) throw new Error("EPUB 目录记录无效");
+    if (at + 46 > offset + size || data.getUint32(at, true) !== 0x02014b50 || ++found > 12000) throw new Error("Invalid EPUB directory entry");
     at += 46 + data.getUint16(at + 28, true) + data.getUint16(at + 30, true) + data.getUint16(at + 32, true);
-    if (at > offset + size) throw new Error("EPUB 目录越界");
+    if (at > offset + size) throw new Error("EPUB directory is out of bounds");
   }
-  if (found !== count) throw new Error("EPUB 目录数量不一致");
+  if (found !== count) throw new Error("EPUB directory entry count does not match");
 }
 
 /** Resolve container-relative URLs, never filesystem/remote URLs. */
@@ -48,19 +48,19 @@ export function elements(root: Document | Element, name: string): Element[] {
 
 export function parseBookXml(text: string): Document {
   // External DTDs/entities are unnecessary for this semantic preview.
-  if (/<!ENTITY\s/i.test(text) || /<!DOCTYPE[^>]*\[/i.test(text)) throw new Error("电子书包含不支持的 XML 实体声明");
+  if (/<!ENTITY\s/i.test(text) || /<!DOCTYPE[^>]*\[/i.test(text)) throw new Error("This book contains unsupported XML entity declarations");
   const clean = text.replace(/<!DOCTYPE[^>]*>/gi, "").replace(/&nbsp;/g, "&#160;");
   const doc = new DOMParser().parseFromString(clean, "application/xml");
-  if (elements(doc, "parsererror").length) throw new Error("电子书章节格式损坏或不是有效 XHTML");
+  if (elements(doc, "parsererror").length) throw new Error("This chapter is damaged or is not valid XHTML");
   return doc;
 }
 
 /** Streaming inflate enforces the actual output limit, not only the untrusted ZIP header size. */
 export function readBookEntry(zip: JSZip, path: string, limit: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
   const entry = zip.file(path);
-  if (!entry) return Promise.reject(new Error(`电子书中缺少文件：${path}`));
+  if (!entry) return Promise.reject(new Error(`Missing file in book: ${path}`));
   const declaredSize = (entry as typeof entry & { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
-  if (declaredSize !== undefined && declaredSize > limit) return Promise.reject(new Error("章节或图片超过预览大小限制"));
+  if (declaredSize !== undefined && declaredSize > limit) return Promise.reject(new Error("Chapter or image exceeds the preview size limit"));
   return new Promise((resolve, reject) => {
     // JSZip documents this API but its bundled typings omit it on JSZipObject.
     const stream = (entry as JSZip.JSZipObject & { internalStream(type: "uint8array"): JSZip.JSZipStreamHelper<Uint8Array> }).internalStream("uint8array");
@@ -77,13 +77,13 @@ export function readBookEntry(zip: JSZip, path: string, limit: number, signal: A
         chunks = []; resolve(bytes);
       }
     };
-    const abort = (): void => stop(new DOMException("预览已取消", "AbortError"));
-    const timer = setTimeout(() => stop(new Error("电子书内容读取超时")), 8000);
+    const abort = (): void => stop(new DOMException("Preview cancelled", "AbortError"));
+    const timer = setTimeout(() => stop(new Error("Reading the book timed out")), 8000);
     signal.addEventListener("abort", abort, { once: true });
     stream.on("data", chunk => {
       if (done) return;
       length += chunk.length;
-      if (length > limit) stop(new Error("章节或图片超过预览大小限制"));
+      if (length > limit) stop(new Error("Chapter or image exceeds the preview size limit"));
       else chunks.push(chunk);
     });
     stream.on("error", error => stop(error)); stream.on("end", () => stop());
@@ -92,12 +92,12 @@ export function readBookEntry(zip: JSZip, path: string, limit: number, signal: A
 }
 
 export async function openEpub(bytes: ArrayBuffer, signal: AbortSignal) {
-  if (bytes.byteLength > MAX_EPUB_BYTES) throw new Error("EPUB 超过 64 MB 轻量预览上限");
+  if (bytes.byteLength > MAX_EPUB_BYTES) throw new Error("EPUB exceeds the 64 MB preview limit");
   signal.throwIfAborted();
   validateContainer(bytes);
   const zip = await JSZip.loadAsync(bytes, { createFolders: false });
   signal.throwIfAborted();
-  if (Object.keys(zip.files).length > 12000) throw new Error("电子书内文件数量超过预览上限");
+  if (Object.keys(zip.files).length > 12000) throw new Error("This book has too many files to preview");
   const readXml = async (path: string, readingSignal = signal): Promise<Document> => {
     const data = await readBookEntry(zip, path, MAX_XML, readingSignal);
     const encoding = data[0] === 0xff && data[1] === 0xfe ? "utf-16le" : data[0] === 0xfe && data[1] === 0xff ? "utf-16be" : "utf-8";
@@ -107,7 +107,7 @@ export async function openEpub(bytes: ArrayBuffer, signal: AbortSignal) {
     const container = await readXml("META-INF/container.xml");
     const root = elements(container, "rootfile").find(item => item.getAttribute("media-type") === "application/oebps-package+xml") ?? elements(container, "rootfile")[0];
     const packagePath = bookLink("", root?.getAttribute("full-path") ?? "")?.path;
-    if (!packagePath) throw new Error("找不到 EPUB 书籍目录");
+    if (!packagePath) throw new Error("EPUB package could not be found");
     const pkg = await readXml(packagePath);
     const manifest = new Map<string, BookItem>();
     for (const item of elements(pkg, "item")) {
@@ -118,9 +118,9 @@ export async function openEpub(bytes: ArrayBuffer, signal: AbortSignal) {
     const chapters: BookItem[] = [];
     for (const ref of elements(pkg, "itemref")) {
       const item = manifest.get(ref.getAttribute("idref") ?? "");
-      if (item && ["application/xhtml+xml", "text/html"].includes(item.type)) chapters.push({ ...item, title: `第 ${chapters.length + 1} 节` });
+      if (item && ["application/xhtml+xml", "text/html"].includes(item.type)) chapters.push({ ...item, title: `Chapter ${chapters.length + 1}` });
     }
-    if (!chapters.length || chapters.length > 2000) throw new Error("EPUB 没有可预览的章节，或章节数量超过上限");
+    if (!chapters.length || chapters.length > 2000) throw new Error("EPUB has no readable chapters or too many chapters");
     const encrypted = new Set<string>();
     if (zip.file("META-INF/encryption.xml")) {
       const xml = await readXml("META-INF/encryption.xml");
@@ -128,7 +128,7 @@ export async function openEpub(bytes: ArrayBuffer, signal: AbortSignal) {
         const path = bookLink("", item.getAttribute("URI") ?? "")?.path;
         if (path) encrypted.add(path);
       }
-      if (chapters.some(item => encrypted.has(item.path))) throw new Error("暂不支持 DRM 加密的 EPUB");
+      if (chapters.some(item => encrypted.has(item.path))) throw new Error("DRM-protected EPUB files are not supported");
     }
     const toc: Array<{ title: string; target: BookLink }> = [];
     const nav = [...manifest.values()].find(item => item.properties.split(/\s+/).includes("nav"));
@@ -156,7 +156,7 @@ export async function openEpub(bytes: ArrayBuffer, signal: AbortSignal) {
     const title = metadata ? elements(metadata, "title")[0]?.textContent?.trim().slice(0, 300) : "";
     const author = metadata ? elements(metadata, "creator").map(el => el.textContent?.trim()).filter(Boolean).join(" / ").slice(0, 300) : "";
     const images = new Map([...manifest.values()].filter(item => /^image\/(jpeg|png|gif|webp|avif|bmp)$/.test(item.type) && !encrypted.has(item.path)).map(item => [item.path, item]));
-    return { title: title || "未命名电子书", author, chapters, images, toc, readXml,
+    return { title: title || "Untitled book", author, chapters, images, toc, readXml,
       readImage: (path: string, readingSignal: AbortSignal) => readBookEntry(zip, path, 8 * 1024 * 1024, readingSignal),
       dispose() { zip.files = {}; manifest.clear(); images.clear(); toc.length = 0; chapters.length = 0; },
     };

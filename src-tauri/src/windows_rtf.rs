@@ -33,7 +33,7 @@ impl Drop for RtfLibrary {
 fn denied<T>() -> Result<T> {
     Err(Error::new(
         HRESULT(0x80070005_u32 as i32),
-        "只读预览不允许嵌入对象",
+        "Embedded objects are disabled in read-only preview",
     ))
 }
 
@@ -101,6 +101,44 @@ struct Input {
     deadline: Instant,
     remaining: usize,
 }
+
+/// Keep a 32-DIP reading inset inside the control, including after resize/DPI
+/// changes. The scrollbar stays at the window edge and the document is untouched.
+pub fn update_reading_rect(hwnd: HWND) -> Result<()> {
+    use windows::Win32::UI::{
+        Controls::{EM_GETRECT, EM_SETRECT},
+        HiDpi::GetDpiForWindow,
+    };
+    unsafe {
+        let mut client = RECT::default();
+        GetClientRect(hwnd, &mut client)?;
+        let inset = (32 * GetDpiForWindow(hwnd).max(96) / 96) as i32;
+        let x = inset.min((client.right / 4).max(0));
+        let y = inset.min((client.bottom / 4).max(0));
+        let rect = RECT {
+            left: x,
+            top: y,
+            right: client.right - x,
+            bottom: client.bottom - y,
+        };
+        let mut current = RECT::default();
+        SendMessageW(
+            hwnd,
+            EM_GETRECT,
+            None,
+            Some(LPARAM(&mut current as *mut RECT as isize)),
+        );
+        if current != rect {
+            SendMessageW(
+                hwnd,
+                EM_SETRECT,
+                None,
+                Some(LPARAM(&rect as *const RECT as isize)),
+            );
+        }
+    }
+    Ok(())
+}
 unsafe extern "system" fn read_rtf(
     cookie: usize,
     buffer: *mut u8,
@@ -137,7 +175,7 @@ pub fn open(parent: HWND, path: &Path, generation: u32) -> Result<(HWND, RtfLibr
     }
     let mut signature = [0; 5];
     file.read_exact(&mut signature)
-        .map_err(|_| Error::new(HRESULT(-2147467259), "RTF 文件不完整"))?;
+        .map_err(|_| Error::new(HRESULT(-2147467259), "Incomplete RTF file"))?;
     if &signature != b"{\\rtf" {
         return denied();
     }
@@ -201,7 +239,14 @@ pub fn open(parent: HWND, path: &Path, generation: u32) -> Result<(HWND, RtfLibr
         );
         if stream.dwError != 0 || !crate::preview_generation_is_current(generation) {
             let _ = DestroyWindow(hwnd);
-            return Err(Error::new(HRESULT(-2147467259), "RTF 读取失败或已取消"));
+            return Err(Error::new(
+                HRESULT(-2147467259),
+                "RTF read failed or was cancelled",
+            ));
+        }
+        if let Err(error) = update_reading_rect(hwnd) {
+            let _ = DestroyWindow(hwnd);
+            return Err(error);
         }
         Ok((hwnd, library))
     }
@@ -305,6 +350,22 @@ mod tests {
                 assert!(text.contains("软件许可证和担保"));
             }
             assert_ne!(GetWindowLongW(child, GWL_STYLE) & ES_READONLY, 0);
+            for width in [850, 420] {
+                SetWindowPos(child, None, 0, 0, width, 650, SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+                update_reading_rect(child).unwrap();
+                let mut client = RECT::default();
+                let mut reading = RECT::default();
+                GetClientRect(child, &mut client).unwrap();
+                SendMessageW(
+                    child,
+                    windows::Win32::UI::Controls::EM_GETRECT,
+                    None,
+                    Some(LPARAM(&mut reading as *mut RECT as isize)),
+                );
+                assert!(reading.left >= 32 && reading.top >= 32);
+                assert!(client.right - reading.right >= 32 && client.bottom - reading.bottom >= 32);
+                assert!(reading.right > reading.left && reading.bottom > reading.top);
+            }
             assert_paints_text(child);
             DestroyWindow(child).unwrap();
             drop(library);

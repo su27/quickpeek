@@ -53,7 +53,7 @@ export function renderFileInfoViewer(
     fallbackIcon.setAttribute("aria-hidden", "true");
     const badge = document.createElement("span");
     badge.textContent = isDirectory
-      ? "文件夹"
+      ? "Folder"
       : extension
         ? extension.slice(0, 7).toLocaleUpperCase()
         : "FILE";
@@ -68,18 +68,18 @@ export function renderFileInfoViewer(
   const type = document.createElement("p");
   type.className = "file-info-type";
   type.textContent = isDirectory
-    ? "文件夹"
+    ? "Folder"
     : extension
-      ? `${extension.toLocaleUpperCase()} 文件`
-      : "文件";
+      ? `${extension.toLocaleUpperCase()} file`
+      : "File";
 
   const details = document.createElement("dl");
   details.className = "file-info-details";
-  if (!isDirectory) addDetail(details, "大小", formatBytes(source.size));
+  if (!isDirectory) addDetail(details, "Size", formatBytes(source.size));
   if (source.modifiedAt) {
-    addDetail(details, "修改时间", new Date(source.modifiedAt).toLocaleString());
+    addDetail(details, "Modified", new Date(source.modifiedAt).toLocaleString("en-US"));
   }
-  if (source.path) addDetail(details, "位置", source.path);
+  if (source.path) addDetail(details, "Location", source.path);
 
   frame.append(icon, name, type, details);
   host.classList.add("is-file-info");

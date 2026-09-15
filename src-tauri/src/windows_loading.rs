@@ -103,7 +103,7 @@ pub fn begin(app: &AppHandle, generation: u32, name: String) {
             ui.shown
         });
         if shown {
-            let _ = window.set_title(&format!("{} · 正在加载", request.name));
+            let _ = window.set_title(&format!("{} · Loading", request.name));
         }
         unsafe {
             SetTimer(Some(owner), TIMER, if shown { 33 } else { 250 }, Some(tick));
@@ -244,7 +244,7 @@ unsafe extern "system" fn tick(_hwnd: HWND, _message: u32, _timer: usize, _time:
             ui.overlay = overlay;
             ui.shown = true;
         });
-        let _ = window.set_title(&format!("{} · 正在加载", request.name));
+        let _ = window.set_title(&format!("{} · Loading", request.name));
         // Place the opaque native cover before showing its owner. Native child
         // handlers and a busy WebView cannot paint through this owned popup.
         position_ui();
@@ -311,7 +311,7 @@ unsafe extern "system" fn paint_window(
             let font = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, COLORREF(0x999999));
-            let mut text: Vec<u16> = "正在加载…".encode_utf16().collect();
+            let mut text: Vec<u16> = "Loading…".encode_utf16().collect();
             let mut label = RECT {
                 left: 0,
                 top: y + (24.0 * scale) as i32,

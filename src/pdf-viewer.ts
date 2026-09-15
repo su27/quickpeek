@@ -38,7 +38,7 @@ async function renderNativePdf(
     page.dataset.pageIndex = String(index);
     page.style.aspectRatio = `${dimensions.width} / ${dimensions.height}`;
     const image = document.createElement("img");
-    image.alt = `PDF 第 ${index + 1} 页`;
+    image.alt = `PDF page ${index + 1}`;
     image.draggable = false;
     const errorLabel = document.createElement("span");
     errorLabel.className = "pdf-native-page-error";
@@ -110,7 +110,7 @@ async function renderNativePdf(
       entry.page.classList.remove("is-ready");
       entry.image.removeAttribute("src");
       if (!destroyed) {
-        entry.errorLabel.textContent = "此页暂时无法显示";
+        entry.errorLabel.textContent = "This page could not be displayed";
         entry.errorLabel.hidden = false;
       }
       throw error;
@@ -193,12 +193,12 @@ async function renderBrowserPdf(
 ): Promise<PdfViewerResult> {
   const frame = document.createElement("iframe");
   frame.className = "pdf-viewer";
-  frame.title = "PDF 文档";
+  frame.title = "PDF document";
   host.classList.add("is-pdf");
 
   const loaded = new Promise<void>((resolve, reject) => {
     frame.addEventListener("load", () => resolve(), { once: true });
-    frame.addEventListener("error", () => reject(new Error("PDF 加载失败")), { once: true });
+    frame.addEventListener("error", () => reject(new Error("Could not load PDF")), { once: true });
   });
   frame.src = `${url}#toolbar=0&view=FitH`;
   host.append(frame);

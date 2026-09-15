@@ -677,14 +677,14 @@ export async function renderTextViewer(
   if (truncated) {
     const notice = document.createElement("div");
     notice.className = "text-viewer-notice";
-    notice.textContent = "文件较大，仅显示前 20 MB";
+    notice.textContent = "Large file: showing the first 20 MB";
     viewer.append(notice);
   } else if ((language || isMarkdown || isSubtitle) && !highlighted && !renderFormattedMarkdown) {
     const notice = document.createElement("div");
     notice.className = "text-viewer-notice";
     notice.textContent = isMarkdown
-      ? "文件超过 2 MB，已切换到纯文本显示"
-      : "文件超过 2 MB，已关闭语法高亮";
+      ? "File exceeds 2 MB; showing plain text"
+      : "File exceeds 2 MB; syntax highlighting is disabled";
     viewer.append(notice);
   }
 

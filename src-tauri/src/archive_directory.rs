@@ -59,42 +59,42 @@ fn zip_directory<R: Read + Seek>(
             tail[i..].starts_with(b"PK\x05\x06")
                 && i + 22 + u16le(&tail, i + 20) as usize == tail.len()
         })
-        .ok_or("没有 ZIP 中央目录")?;
+        .ok_or("ZIP central directory not found")?;
     if u16le(&tail, eocd + 4) != 0 || u16le(&tail, eocd + 6) != 0 {
-        return Err("不支持分卷 ZIP".into());
+        return Err("Split ZIP archives are not supported".into());
     }
     let count = u16le(&tail, eocd + 10) as usize;
     let size = u32le(&tail, eocd + 12) as u64;
     let offset = u32le(&tail, eocd + 16) as u64;
     if count == 65535 || size == u32::MAX as u64 || offset == u32::MAX as u64 {
-        return Err("ZIP64 使用系统目录读取器".into());
+        return Err("ZIP64 requires the system archive reader".into());
     }
     let end = offset
         .checked_add(size)
         .filter(|end| *end <= len)
-        .ok_or("ZIP 目录范围无效")?;
+        .ok_or("Invalid ZIP directory bounds")?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
     let mut entries = Vec::new();
     let mut names = 0;
     for _ in 0..count.min(MAX_ENTRIES) {
         if !current() {
-            return Err("预览已取消".into());
+            return Err("Preview cancelled".into());
         }
         let pos = file.stream_position().map_err(|e| e.to_string())?;
         if pos + 46 > end {
-            return Err("ZIP 目录不完整".into());
+            return Err("Incomplete ZIP directory".into());
         }
         let mut header = [0; 46];
         file.read_exact(&mut header).map_err(|e| e.to_string())?;
         if !header.starts_with(b"PK\x01\x02") {
-            return Err("ZIP 目录记录无效".into());
+            return Err("Invalid ZIP directory entry".into());
         }
         let name_len = u16le(&header, 28) as usize;
         let extra_len = u16le(&header, 30) as usize;
         let comment_len = u16le(&header, 32) as u64;
         if pos + 46 + name_len as u64 + extra_len as u64 + comment_len > end {
-            return Err("ZIP 目录越界".into());
+            return Err("ZIP directory is out of bounds".into());
         }
         names += name_len;
         if names > MAX_NAMES {
@@ -250,13 +250,13 @@ fn directory_from_listing(text: &str) -> Directory {
 
 pub fn read(path: &Path, generation: u32) -> Result<Directory, String> {
     static WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _work = WORK.lock().map_err(|_| "目录读取器不可用")?;
+    let _work = WORK.lock().map_err(|_| "Archive reader unavailable")?;
     let current = || crate::preview_generation_is_current(generation);
     if !current() {
-        return Err("预览已取消".into());
+        return Err("Preview cancelled".into());
     }
     if !supported(path) || !path.is_file() {
-        return Err("不是支持的压缩包".into());
+        return Err("Unsupported archive format".into());
     }
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let mut signature = [0; 4];
@@ -280,12 +280,12 @@ fn system_directory(path: &Path, current: impl Fn() -> bool) -> Result<Directory
     };
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
     if !current() {
-        return Err("预览已取消".into());
+        return Err("Preview cancelled".into());
     }
     let mut directory = [0u16; 32768];
     let count = unsafe { GetSystemDirectoryW(Some(&mut directory)) } as usize;
     if count == 0 || count >= directory.len() {
-        return Err("无法定位系统 tar".into());
+        return Err("System tar could not be found".into());
     }
     let tar =
         std::path::PathBuf::from(String::from_utf16_lossy(&directory[..count])).join("tar.exe");
@@ -297,7 +297,7 @@ fn system_directory(path: &Path, current: impl Fn() -> bool) -> Result<Directory
         .stderr(Stdio::null())
         .creation_flags(0x08000000)
         .spawn()
-        .map_err(|e| format!("系统 tar 不可用：{e}"))?;
+        .map_err(|e| format!("System tar unavailable: {e}"))?;
     let stdout = child.stdout.take().unwrap();
     let overflow = Arc::new(AtomicBool::new(false));
     let reader_overflow = overflow.clone();
@@ -313,9 +313,9 @@ fn system_directory(path: &Path, current: impl Fn() -> bool) -> Result<Directory
             let _ = child.kill();
             let _ = child.wait();
             break Err(if !current() {
-                "预览已取消"
+                "Preview cancelled"
             } else {
-                "压缩包目录超时或超过大小限制"
+                "Archive listing timed out or exceeded the size limit"
             }
             .to_string());
         }
@@ -324,7 +324,7 @@ fn system_directory(path: &Path, current: impl Fn() -> bool) -> Result<Directory
                 break if status.success() {
                     Ok(())
                 } else {
-                    Err("系统不支持此压缩包，或文件已损坏/加密".into())
+                    Err("This archive is unsupported, damaged, or encrypted".into())
                 }
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -335,17 +335,19 @@ fn system_directory(path: &Path, current: impl Fn() -> bool) -> Result<Directory
             }
         }
     };
-    let (read_result, output) = reader.join().map_err(|_| "读取目录输出失败")?;
+    let (read_result, output) = reader
+        .join()
+        .map_err(|_| "Could not read archive listing")?;
     status?;
     read_result.map_err(|e| e.to_string())?;
     if output.len() > MAX_NAMES {
-        return Err("压缩包目录超过大小限制".into());
+        return Err("Archive listing exceeds the size limit".into());
     }
     Ok(directory_from_listing(&decode_system_listing(&output)))
 }
 #[cfg(not(windows))]
 fn system_directory(_: &Path, _: impl Fn() -> bool) -> Result<Directory, String> {
-    Err("需要 Windows tar".into())
+    Err("Windows tar is required".into())
 }
 
 #[cfg(test)]

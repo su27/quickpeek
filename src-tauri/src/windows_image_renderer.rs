@@ -25,7 +25,7 @@ impl<F: FnMut()> Drop for CloseOnDrop<F> {
 impl RuntimeApartment {
     fn initialize() -> Result<Self, String> {
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
-            .map_err(|error| format!("无法初始化 Windows 图像运行时：{error}"))?;
+            .map_err(|error| format!("Could not initialize Windows imaging: {error}"))?;
         Ok(Self)
     }
 }
@@ -39,7 +39,7 @@ impl Drop for RuntimeApartment {
 fn canonical_path_text(path: &Path) -> Result<String, String> {
     let absolute_path = path
         .canonicalize()
-        .map_err(|error| format!("无法解析图像路径：{error}"))?;
+        .map_err(|error| format!("Could not resolve image path: {error}"))?;
     let canonical_text = absolute_path.as_os_str().to_string_lossy();
     Ok(canonical_text
         .strip_prefix(r"\\?\UNC\")
@@ -55,24 +55,24 @@ fn canonical_path_text(path: &Path) -> Result<String, String> {
 fn read_stream(stream: &InMemoryRandomAccessStream) -> Result<Vec<u8>, String> {
     let length = stream
         .Size()
-        .map_err(|error| format!("无法读取转换后图像大小：{error}"))?;
-    let length = u32::try_from(length).map_err(|_| "转换后图像过大".to_string())?;
+        .map_err(|error| format!("Could not read converted image size: {error}"))?;
+    let length = u32::try_from(length).map_err(|_| "Converted image is too large".to_string())?;
     let input = stream
         .GetInputStreamAt(0)
-        .map_err(|error| format!("无法读取转换后图像缓冲区：{error}"))?;
+        .map_err(|error| format!("Could not read converted image buffer: {error}"))?;
     let reader = DataReader::CreateDataReader(&input)
-        .map_err(|error| format!("无法创建图像缓冲区读取器：{error}"))?;
+        .map_err(|error| format!("Could not create image buffer reader: {error}"))?;
     let loaded = reader
         .LoadAsync(length)
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("无法载入转换后图像：{error}"))?;
+        .map_err(|error| format!("Could not load converted image: {error}"))?;
     if loaded != length {
-        return Err(format!("转换后图像读取不完整：{loaded}/{length}"));
+        return Err(format!("Incomplete converted image: {loaded}/{length}"));
     }
     let mut bytes = vec![0; length as usize];
     reader
         .ReadBytes(&mut bytes)
-        .map_err(|error| format!("无法复制转换后图像：{error}"))?;
+        .map_err(|error| format!("Could not copy converted image: {error}"))?;
     let _ = reader.Close();
     Ok(bytes)
 }
@@ -85,7 +85,7 @@ pub fn decode_photo_preview(
     // Only one native photo decoder owns a pixel buffer at a time. Superseded
     // requests exit before decoding/encoding instead of accumulating images.
     static WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _work = WORK.lock().map_err(|_| "图像解码器不可用")?;
+    let _work = WORK.lock().map_err(|_| "Image decoder unavailable")?;
     decode_frame_with_options(path, max_dimension.min(4096), 0, true, current)
 }
 
@@ -135,7 +135,7 @@ fn decode_frame_with_options(
         if current() {
             Ok(())
         } else {
-            Err("预览已取消".to_string())
+            Err("Preview cancelled".to_string())
         }
     };
     check_current()?;
@@ -143,19 +143,19 @@ fn decode_frame_with_options(
     let path_text = canonical_path_text(path)?;
     let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path_text.as_str()))
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("无法打开图像文件 ({path_text})：{error}"))?;
+        .map_err(|error| format!("Could not open image ({path_text}): {error}"))?;
     let input = file
         .OpenAsync(FileAccessMode::Read)
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("无法读取图像文件：{error}"))?;
+        .map_err(|error| format!("Could not read image: {error}"))?;
     let _input_close = CloseOnDrop(|| {
         let _ = input.Close();
     });
     let decoder = BitmapDecoder::CreateAsync(&input)
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("Windows 无法解码此图像：{error}"))?;
+        .map_err(|error| format!("Windows could not decode this image: {error}"))?;
     if page_index >= decoder.FrameCount().map_err(|e| e.to_string())? {
-        return Err("图像页码超出范围".into());
+        return Err("Image page index is out of range".into());
     }
     let decoder = decoder
         .GetFrameAsync(page_index)
@@ -164,12 +164,12 @@ fn decode_frame_with_options(
 
     let width = decoder
         .OrientedPixelWidth()
-        .map_err(|error| format!("无法读取图像宽度：{error}"))?;
+        .map_err(|error| format!("Could not read image width: {error}"))?;
     let height = decoder
         .OrientedPixelHeight()
-        .map_err(|error| format!("无法读取图像高度：{error}"))?;
+        .map_err(|error| format!("Could not read image height: {error}"))?;
     if width == 0 || height == 0 {
-        return Err("图像尺寸无效".to_string());
+        return Err("Invalid image dimensions".to_string());
     }
 
     // Panoramas/long images are viewed by scrolling, not by fitting their entire
@@ -189,12 +189,12 @@ fn decode_frame_with_options(
     // Never discard actual or potentially meaningful alpha to speed up a photo.
     let jpeg =
         photo && decoder.BitmapAlphaMode().map_err(|e| e.to_string())? == BitmapAlphaMode::Ignore;
-    let transform =
-        BitmapTransform::new().map_err(|error| format!("无法创建图像缩放参数：{error}"))?;
+    let transform = BitmapTransform::new()
+        .map_err(|error| format!("Could not create image scaling options: {error}"))?;
     transform
         .SetScaledWidth(output_width)
         .and_then(|_| transform.SetScaledHeight(output_height))
-        .map_err(|error| format!("无法设置图像缩放参数：{error}"))?;
+        .map_err(|error| format!("Could not set image scaling options: {error}"))?;
     check_current()?;
     let bitmap = decoder
         .GetSoftwareBitmapTransformedAsync(
@@ -209,14 +209,14 @@ fn decode_frame_with_options(
             ColorManagementMode::ColorManageToSRgb,
         )
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("无法转换图像像素：{error}"))?;
+        .map_err(|error| format!("Could not convert image pixels: {error}"))?;
     let _bitmap_close = CloseOnDrop(|| {
         let _ = bitmap.Close();
     });
     check_current()?;
 
     let output = InMemoryRandomAccessStream::new()
-        .map_err(|error| format!("无法创建图像输出缓冲区：{error}"))?;
+        .map_err(|error| format!("Could not create image output buffer: {error}"))?;
     let _output_close = CloseOnDrop(|| {
         let _ = output.Close();
     });
@@ -242,12 +242,12 @@ fn decode_frame_with_options(
         )
     }
     .and_then(|operation| operation.get())
-    .map_err(|error| format!("无法创建图像编码器：{error}"))?;
+    .map_err(|error| format!("Could not create image encoder: {error}"))?;
     encoder
         .SetSoftwareBitmap(&bitmap)
         .and_then(|_| encoder.FlushAsync())
         .and_then(|operation| operation.get())
-        .map_err(|error| format!("无法编码预览图：{error}"))?;
+        .map_err(|error| format!("Could not encode preview image: {error}"))?;
     check_current()?;
     let bytes = read_stream(&output)?;
     Ok(bytes)

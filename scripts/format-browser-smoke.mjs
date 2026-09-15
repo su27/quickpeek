@@ -32,7 +32,7 @@ window.result=(async()=>{
  const tiff=await renderTiffViewer('sample.tiff',1,{host,signal:abort.signal,isActive:()=>true,setPageLabel:t=>pageLabel=t,viewport:host});
  assert(window.calls.filter(c=>c[0]==='render_tiff_page').length===1,'TIFF eagerly decoded other pages');
  host.querySelectorAll('button')[1].click();
- await new Promise((resolve,reject)=>{const deadline=performance.now()+5000;function check(){if(pageLabel==='2/2 页')return resolve();if(performance.now()>deadline)return reject(new Error('TIFF page turn timeout '+JSON.stringify({pageLabel,calls:window.calls,controls:host.querySelector('nav')?.outerHTML})));requestAnimationFrame(check)}check()});
+ await new Promise((resolve,reject)=>{const deadline=performance.now()+5000;function check(){if(pageLabel==='2/2')return resolve();if(performance.now()>deadline)return reject(new Error('TIFF page turn timeout '+JSON.stringify({pageLabel,calls:window.calls,controls:host.querySelector('nav')?.outerHTML})));requestAnimationFrame(check)}check()});
  assert(host.querySelectorAll('.image-viewer').length===1,'TIFF retained old frame');
  tiff.destroy();assert(!host.querySelector('img')&&!host.querySelector('nav'),'TIFF resources not released');
  window.heicTest=true;

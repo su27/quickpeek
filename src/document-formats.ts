@@ -79,12 +79,12 @@ export type DocumentFormat = {
 const MAX_TEXT_BYTES = 20 * 1024 * 1024;
 
 function requireBytes(source: PreviewSource): ArrayBuffer {
-  if (source.type !== "buffer") throw new Error("此查看器需要文件数据");
+  if (source.type !== "buffer") throw new Error("This viewer requires file data");
   return source.bytes;
 }
 
 function requireUrl(source: PreviewSource): string {
-  if (source.type !== "url") throw new Error("此查看器需要文件地址");
+  if (source.type !== "url") throw new Error("This viewer requires a file URL");
   return source.url;
 }
 
@@ -136,7 +136,7 @@ const formats: readonly DocumentFormat[] = [
     mimeType: "application/epub+zip",
     searchable: true,
     async render(source, context) {
-      if (source.size > 64 * 1024 * 1024) throw new Error("EPUB 超过 64 MB 轻量预览上限");
+      if (source.size > 64 * 1024 * 1024) throw new Error("EPUB exceeds the 64 MB preview limit");
       const { renderEpubViewer } = await import("./epub-viewer");
       const viewer = await renderEpubViewer(requireBytes(source), context);
       return { ...noController(), get fixedPageLabel() { return viewer.label; }, destroy: viewer.destroy };
@@ -149,7 +149,7 @@ const formats: readonly DocumentFormat[] = [
     mimeType: "application/octet-stream",
     searchable: false,
     async render(source, { host, signal }) {
-      if (source.size > 20 * 1024 * 1024) throw new Error("字体超过 20 MB 预览上限");
+      if (source.size > 20 * 1024 * 1024) throw new Error("Font exceeds the 20 MB preview limit");
       const { renderFontViewer } = await import("./font-viewer");
       const viewer = await renderFontViewer(requireUrl(source), source.name, host, signal);
       return noController({ fixedPageLabel: "" }, viewer.destroy);
@@ -162,10 +162,10 @@ const formats: readonly DocumentFormat[] = [
     mimeType: "image/tiff",
     searchable: false,
     async render(source, context) {
-      if (!source.path || source.systemGeneration === undefined) throw new Error("TIFF 预览需要本地路径");
+      if (!source.path || source.systemGeneration === undefined) throw new Error("TIFF preview requires a local file path");
       const { renderTiffViewer } = await import("./tiff-viewer");
       const viewer = await renderTiffViewer(source.path, source.systemGeneration, context);
-      return noController({ fixedPageLabel: viewer.info.pageCount > 1 ? `1/${viewer.info.pageCount} 页` : "",
+      return noController({ fixedPageLabel: viewer.info.pageCount > 1 ? `1/${viewer.info.pageCount}` : "",
         previewDimensions: viewer.info }, viewer.destroy);
     },
   },
@@ -178,16 +178,16 @@ const formats: readonly DocumentFormat[] = [
     async render(source, { host }) {
       const { invoke } = await import("@tauri-apps/api/core");
       const generation = source.systemGeneration;
-      if (!source.path || generation === undefined) throw new Error("系统预览需要本地文件路径");
+      if (!source.path || generation === undefined) throw new Error("System preview requires a local file path");
       if (!await invoke<boolean>("prepare_system_preview", { path: source.path, generation })) {
-        throw new Error("系统预览处理器不可用或预览已取消");
+        throw new Error("System preview is unavailable or was cancelled");
       }
       host.classList.add("is-system-preview");
       return {
         ...noController({ fixedPageLabel: "" }),
         async activate() {
           if (!await invoke<boolean>("activate_system_preview", { generation })) {
-            throw new Error("系统预览未能激活或已取消");
+            throw new Error("System preview could not be shown or was cancelled");
           }
         },
         destroy() {
@@ -244,7 +244,7 @@ const formats: readonly DocumentFormat[] = [
       const controller = await renderExcelViewer(requireBytes(source), context.host, {
         convertWorkbook: !["xlsm", "xlsx", "xltm", "xltx"].includes(extension),
         onSheetChange(index, count) {
-          if (context.isActive()) context.setPageLabel(`${index + 1}/${count} 页`);
+          if (context.isActive()) context.setPageLabel(`${index + 1}/${count}`);
         },
       });
       return {
@@ -270,7 +270,7 @@ const formats: readonly DocumentFormat[] = [
         {
           onSlideChange(index, count) {
             if (context.isActive()) {
-              context.setPageLabel(count > 0 ? `${index + 1}/${count} 页` : "0/0 页");
+              context.setPageLabel(count > 0 ? `${index + 1}/${count}` : "0/0");
             }
           },
         },
@@ -299,11 +299,11 @@ const formats: readonly DocumentFormat[] = [
         previewWidth,
         host,
         (page, count) => {
-          if (isActive()) setPageLabel(`${page}/${count} 页`);
+          if (isActive()) setPageLabel(`${page}/${count}`);
         },
       );
       return noController(
-        { fixedPageLabel: viewer.pageCount > 0 ? `1/${viewer.pageCount} 页` : "", previewDimensions: viewer.dimensions },
+        { fixedPageLabel: viewer.pageCount > 0 ? `1/${viewer.pageCount}` : "", previewDimensions: viewer.dimensions },
         viewer.destroy,
       );
     },
@@ -401,15 +401,15 @@ const formats: readonly DocumentFormat[] = [
       if (source.type === "buffer") {
         const { renderBrowserZip } = await import("./zip-viewer");
         const viewer = await renderBrowserZip(source.bytes, host);
-        return noController({ fixedPageLabel: `${viewer.count} 项` }, viewer.destroy);
+        return noController({ fixedPageLabel: `${viewer.count} items` }, viewer.destroy);
       }
-      if (!source.path || source.systemGeneration === undefined) throw new Error("压缩包目录预览需要本地路径");
+      if (!source.path || source.systemGeneration === undefined) throw new Error("Archive preview requires a local file path");
       const { invoke } = await import("@tauri-apps/api/core");
       const { previewTask } = await import("./preview-task");
       const { renderArchiveDirectory } = await import("./zip-viewer");
       const directory = await previewTask(invoke<import("./zip-viewer").ArchiveDirectory>("read_archive_directory", { path: source.path, generation: source.systemGeneration }), signal);
       const viewer = renderArchiveDirectory(directory, host);
-      return noController({ fixedPageLabel: `${viewer.count} 项` }, viewer.destroy);
+      return noController({ fixedPageLabel: `${viewer.count} items` }, viewer.destroy);
     },
   },
   {

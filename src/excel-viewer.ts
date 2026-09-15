@@ -175,7 +175,7 @@ export async function renderExcelViewer(
   const abortController = new AbortController();
   const root = document.createElement("section");
   root.className = "excel-viewer";
-  root.setAttribute("aria-label", "XLSX 工作簿");
+  root.setAttribute("aria-label", "Excel workbook");
   host.classList.add("is-excel");
   host.append(root);
 
@@ -188,7 +188,7 @@ export async function renderExcelViewer(
       previewInput = prepared.workbook;
       legacyLayout = prepared.layout;
     } catch (error) {
-      console.warn("无法保留旧版 Excel 布局，将使用兼容模式打开", error);
+      console.warn("Could not preserve legacy Excel layout; using compatibility mode", error);
     }
   }
 
@@ -218,7 +218,7 @@ export async function renderExcelViewer(
   if (workbookData.length === 0) {
     previewer.destroy();
     root.remove();
-    throw new Error("工作簿中没有工作表");
+    throw new Error("This workbook has no worksheets");
   }
 
   let searchMatches: ExcelSearchMatch[] = [];
@@ -306,7 +306,7 @@ export async function renderExcelViewer(
       root.remove();
     },
     getPageLabel() {
-      return `${currentSheetIndex() + 1} / ${workbookData.length} 页`;
+      return `${currentSheetIndex() + 1} / ${workbookData.length}`;
     },
     moveMatch(delta) {
       if (searchMatches.length === 0) return status();

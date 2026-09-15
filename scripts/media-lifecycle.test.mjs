@@ -44,12 +44,12 @@ test("closing during metadata loading rejects and releases decoder immediately",
 });
 test("missing metadata and unsupported codecs cannot hold the queue indefinitely", async () => {
   const { media, session } = fixture(10);
-  await assert.rejects(session.load("broken.mov"), /超时/);
+  await assert.rejects(session.load("broken.mov"), /timed out/);
   assert.equal(media.src, "");
 });
 test("media errors before metadata reject without waiting for timeout", async () => {
   const { media, session } = fixture();
-  const rejected = assert.rejects(session.load("broken.mov"), /无法播放/);
+  const rejected = assert.rejects(session.load("broken.mov"), /Playback failed/);
   media.dispatchEvent(new Event("error"));
   await rejected;
   assert.equal(session.disposed, true);

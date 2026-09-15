@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" style="background: #202020">
+<html lang="en" style="background: #202020">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -15,12 +15,12 @@
             <circle cx="8.5" cy="8.5" r="4.8" />
             <path d="m12 12 4 4" />
           </svg>
-          <input id="searchInput" type="search" placeholder="在文档中查找" aria-label="在文档中查找" autocomplete="off" disabled />
+          <input id="searchInput" type="search" placeholder="Find in document" aria-label="Find in document" autocomplete="off" disabled />
           <span id="searchCount" class="search-count" aria-live="polite"></span>
-          <button id="previousMatch" class="inline-icon" type="button" title="上一个（Shift+Enter）" aria-label="上一个匹配项" disabled>
+          <button id="previousMatch" class="inline-icon" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match" disabled>
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 12.5 4.5-5 4.5 5" /></svg>
           </button>
-          <button id="nextMatch" class="inline-icon" type="button" title="下一个（Enter）" aria-label="下一个匹配项" disabled>
+          <button id="nextMatch" class="inline-icon" type="button" title="Next match (Enter)" aria-label="Next match" disabled>
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 7.5 4.5 5 4.5-5" /></svg>
           </button>
         </div>
@@ -34,12 +34,12 @@
               <path d="M8 4h10l6 6v18H8z" />
               <path d="M18 4v6h6M16 22V13M12.5 16.5 16 13l3.5 3.5" />
             </svg>
-            <strong>松开即可打开</strong>
-            <span>支持文档、媒体、压缩包和任意普通文件</span>
+            <strong>Drop to preview</strong>
+            <span>Preview documents, media, archives, and other files</span>
           </div>
         </div>
 
-        <div id="documentViewport" class="document-viewport" aria-label="文件预览">
+        <div id="documentViewport" class="document-viewport" aria-label="File preview">
           <article id="documentHost" class="document-host"></article>
         </div>
 

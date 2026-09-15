@@ -15,13 +15,14 @@ QuickPeek is for Windows 10 and 11, x64. Microsoft Edge WebView2 is required; if
 - Select a file or folder in File Explorer or on the desktop and press **Space** to preview it.
 - Press **Space** again or **Esc** to close the preview. QuickPeek stays in the tray for the next file.
 - While File Explorer has focus, use the arrow keys or mouse to select another file. The preview follows the selection.
-- Drop a file onto an open preview window, or choose **Open with → QuickPeek** in Windows.
+- Drop a file onto an open preview window.
 - Use the app button in the title bar to open the file with its default application.
 - Press **Ctrl+F** to search supported documents, spreadsheets, presentations, text, archive names, or the current EPUB chapter. Search is not available in every viewer.
 - Use the mouse wheel or touchpad to zoom images, and drag to move around a zoomed image. Multi-page TIFF files have page buttons.
+- Right-click the tray icon and select **Run at startup** to turn automatic startup on or off. A checkmark means it is enabled. It is off by default.
 - To exit completely, choose **Quit QuickPeek** from its tray menu.
 
-Space does not open a preview while you are typing in File Explorer's search box, address bar, or file-renaming field. QuickPeek does not edit or save changes to your files.
+Space does not open a preview while you are typing in File Explorer's search box, address bar, or file-renaming field. QuickPeek does not edit or save changes to your files or change their default applications.
 
 ## Supported files
 

@@ -31,6 +31,8 @@ mod windows_preview_handler;
 mod windows_rtf;
 #[cfg(target_os = "windows")]
 mod windows_shell_icon;
+#[cfg(target_os = "windows")]
+mod windows_startup;
 
 const MAX_TEXT_PREVIEW_BYTES: u64 = 20 * 1024 * 1024;
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -738,12 +740,33 @@ fn log_frontend_error(message: String) {
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit QuickPeek", true, None::<&str>)?;
+    #[cfg(target_os = "windows")]
+    let startup_item = tauri::menu::CheckMenuItem::with_id(
+        app,
+        "startup",
+        "Run at startup",
+        true,
+        windows_startup::enabled().unwrap_or(false),
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "windows")]
+    let menu = Menu::with_items(app, &[&startup_item, &quit_item])?;
+    #[cfg(not(target_os = "windows"))]
     let menu = Menu::with_items(app, &[&quit_item])?;
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("QuickPeek · Press Space in File Explorer to preview")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| {
+        .on_menu_event(move |app, event| {
+            #[cfg(target_os = "windows")]
+            if event.id().as_ref() == "startup" {
+                let result = windows_startup::enabled()
+                    .and_then(|enabled| windows_startup::set_enabled(!enabled));
+                if let Err(error) = result {
+                    diagnostic_log(&format!("Could not change startup setting: {error}"));
+                }
+                let _ = startup_item.set_checked(windows_startup::enabled().unwrap_or(false));
+            }
             if event.id().as_ref() == "quit" {
                 app.exit(0);
             }

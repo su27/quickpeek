@@ -58,7 +58,7 @@ async function open(path, kind, visibility) {
   await evaluate("window.__lastNativeRequest = null");
   const launch = spawnSync(executable, [path], { windowsHide: true, timeout: 15000 });
   assert.equal(launch.status, 0, String(launch.error ?? launch.stderr));
-  await waitFor(`document.title.startsWith(${JSON.stringify(basename(path))})
+  await waitFor(`document.title.startsWith(${JSON.stringify(basename(path).replace(/\s+/g, ' '))})
     && document.querySelector('#documentViewport').classList.contains('is-${kind}')
     && window.__lastNativeRequest !== null
     && document.visibilityState === '${visibility}'`);
@@ -78,6 +78,13 @@ try {
       event: 'preview-file', target: {kind: 'Any'}, handler: window.__nativeTestCallback,
     }); })()`);
   const native = await open(fixture, "system", "hidden");
+  await open(resolve('fixtures/documents/sample.docx'), "docx", "visible");
+  assert.ok(await evaluate("document.querySelectorAll('#documentHost section.docx').length > 0"), "Office worker did not render inside WebView2");
+  if (process.env.QUICKPEEK_PDF_FIXTURE) {
+    await open(resolve(process.env.QUICKPEEK_PDF_FIXTURE), "pdf", "visible");
+    assert.ok(await evaluate("document.querySelector('.pdf-native-page.is-ready img')?.naturalWidth > 64"));
+  }
+  if (process.env.QUICKPEEK_DOC_FIXTURE) await open(resolve(process.env.QUICKPEEK_DOC_FIXTURE), "system", "hidden");
   await open(text, "text", "visible");
   assert.ok(await evaluate("document.body.innerText.includes('WebView restored')"));
   await evaluate(`window.__TAURI_INTERNALS__.invoke('show_preview_window', {
@@ -92,7 +99,7 @@ try {
   await waitFor("!document.querySelector('#workspace').classList.contains('has-document')");
   await open(text, "text", "visible");
   await open(fixture, "system", "hidden");
-  console.log({ nativeSurface: true, textRestored: true, staleCommitIgnored: true,
+  console.log({ officeWorkerInWebView: true, nativeSurface: true, textRestored: true, staleCommitIgnored: true,
     failureFallback: true, closeAndReopen: true });
 } finally {
   await evaluate(`window.__TAURI_INTERNALS__.invoke('plugin:event|unlisten', {

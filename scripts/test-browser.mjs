@@ -6,6 +6,7 @@ const suites = [
   "format-browser-smoke.mjs",
   "pdf-browser-smoke.mjs",
   "preview-shell-smoke.mjs",
+  "preview-lifecycle-browser-smoke.mjs",
 ];
 for (const suite of suites) {
   const path = fileURLToPath(new URL(suite, import.meta.url));

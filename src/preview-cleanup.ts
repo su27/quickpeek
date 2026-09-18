@@ -13,18 +13,3 @@ export class PreviewCleanup {
     await Promise.all([...this.pending]);
   }
 }
-
-/** Hidden windows may stop producing frames. Cancellation must not wait for one. */
-export function nextPreviewPaint(signal?: AbortSignal): Promise<void> {
-  return new Promise(resolve => {
-    let frame = 0;
-    const finish = (): void => {
-      cancelAnimationFrame(frame);
-      signal?.removeEventListener("abort", finish);
-      resolve();
-    };
-    signal?.addEventListener("abort", finish, { once: true });
-    if (signal?.aborted) { finish(); return; }
-    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(finish); });
-  });
-}

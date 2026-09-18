@@ -37,6 +37,7 @@ type PreviewMetadata = {
   pdfPages?: PreviewDimensions[];
   previewDimensions?: PreviewDimensions | null;
   shellIcon?: ShellIcon;
+  loadShellIcon?: () => Promise<ShellIcon | undefined>;
   size: number;
   release?: () => void;
 };
@@ -86,6 +87,14 @@ function requireBytes(source: PreviewSource): ArrayBuffer {
 function requireUrl(source: PreviewSource): string {
   if (source.type !== "url") throw new Error("This viewer requires a file URL");
   return source.url;
+}
+
+async function officeBytes(source: PreviewSource, signal: AbortSignal): Promise<ArrayBuffer> {
+  if (source.size > 32 * 1024 * 1024) throw new Error("Office file exceeds the 32 MB preview limit");
+  const bytes = requireBytes(source);
+  if (new Uint8Array(bytes, 0, Math.min(2, bytes.byteLength)).join(",") !== "80,75") return bytes;
+  const { prepareOfficeInput } = await import("./office-input");
+  return prepareOfficeInput(bytes, signal);
 }
 
 function noController(
@@ -200,11 +209,12 @@ const formats: readonly DocumentFormat[] = [
     kind: "docx",
     extensions: ["docm", "docx", "dotm", "dotx"],
     loadMode: "buffer",
+    maxReadBytes: 32 * 1024 * 1024,
     mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     searchable: true,
-    async render(source, { host }) {
+    async render(source, { host, signal }) {
       const { renderDocx } = await import("./docx-preview-adapter");
-      await renderDocx(requireBytes(source), host, host, {
+      const viewer = await renderDocx(await officeBytes(source, signal), host, host, {
         className: "docx",
         inWrapper: true,
         breakPages: true,
@@ -218,14 +228,15 @@ const formats: readonly DocumentFormat[] = [
         useBase64URL: false,
         experimental: true,
         debug: false,
-      });
-      return noController();
+      }, signal);
+      return noController({}, viewer.destroy);
     },
   },
   {
     kind: "xlsx",
     extensions: ["csv", "ods", "tsv", "xls", "xlsb", "xlsm", "xlsx", "xltm", "xltx"],
     loadMode: "buffer",
+    maxReadBytes: 32 * 1024 * 1024,
     mimeType: {
       csv: "text/csv",
       ods: "application/vnd.oasis.opendocument.spreadsheet",
@@ -241,7 +252,8 @@ const formats: readonly DocumentFormat[] = [
     async render(source, context) {
       const { renderExcelViewer } = await import("./excel-viewer");
       const extension = extensionOf(source.name);
-      const controller = await renderExcelViewer(requireBytes(source), context.host, {
+      const controller = await renderExcelViewer(await officeBytes(source, context.signal), context.host, {
+        signal: context.signal,
         convertWorkbook: !["xlsm", "xlsx", "xltm", "xltx"].includes(extension),
         onSheetChange(index, count) {
           if (context.isActive()) context.setPageLabel(`${index + 1}/${count}`);
@@ -259,15 +271,17 @@ const formats: readonly DocumentFormat[] = [
     kind: "pptx",
     extensions: ["potm", "potx", "ppsm", "ppsx", "pptm", "pptx"],
     loadMode: "buffer",
+    maxReadBytes: 32 * 1024 * 1024,
     mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     searchable: true,
     async render(source, context) {
       const { renderPptxViewer } = await import("./pptx-viewer");
       const controller = await renderPptxViewer(
-        requireBytes(source),
+        await officeBytes(source, context.signal),
         context.host,
         context.viewport,
         {
+          signal: context.signal,
           onSlideChange(index, count) {
             if (context.isActive()) {
               context.setPageLabel(count > 0 ? `${index + 1}/${count}` : "0/0");
@@ -289,7 +303,7 @@ const formats: readonly DocumentFormat[] = [
     loadMode: "url",
     mimeType: "application/pdf",
     searchable: false,
-    async render(source, { host, isActive, previewWidth, setPageLabel }) {
+    async render(source, { host, isActive, previewWidth, setPageLabel, signal }) {
       const { renderPdfViewer } = await import("./pdf-viewer");
       const viewer = await renderPdfViewer(
         requireUrl(source),
@@ -301,6 +315,8 @@ const formats: readonly DocumentFormat[] = [
         (page, count) => {
           if (isActive()) setPageLabel(`${page}/${count}`);
         },
+        signal,
+        source.systemGeneration,
       );
       return noController(
         { fixedPageLabel: viewer.pageCount > 0 ? `1/${viewer.pageCount}` : "", previewDimensions: viewer.dimensions },
@@ -473,8 +489,4 @@ export function fileInfoDocumentFormat(isDirectory = false): DocumentFormat {
 export function mimeTypeFor(name: string, format: DocumentFormat): string {
   if (typeof format.mimeType === "string") return format.mimeType;
   return format.mimeType[extensionOf(name)] ?? "application/octet-stream";
-}
-
-export function acceptedFileExtensions(): string {
-  return "";
 }

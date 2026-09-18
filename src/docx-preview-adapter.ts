@@ -70,23 +70,51 @@ export async function renderDocx(
   bodyContainer: HTMLElement,
   styleContainer: HTMLElement = bodyContainer,
   options?: Partial<Options>,
-): Promise<WordDocument> {
+  signal?: AbortSignal,
+): Promise<WordDocument & { destroy(): void }> {
+  signal?.throwIfAborted();
   const document = await parseAsync(data, options);
-  ensureReadingMargins(document.documentPart?.body, true);
-  const correctedCells = normalizeTableCellTextDirections(document.documentPart?.body);
-  const nodes = await renderDocument(document, options);
+  signal?.throwIfAborted();
+  const urls = new Set<string>();
+  let disposed = false;
+  const destroy = (): void => {
+    disposed = true;
+    signal?.removeEventListener("abort", destroy);
+    for (const url of urls) URL.revokeObjectURL(url);
+    urls.clear();
+  };
+  // Scope URL ownership to this document, including images/fonts completing
+  // after cancellation. Never patch the process-wide URL factory.
+  const owner = document as WordDocument & { blobToURL(blob: Blob, path: string): string | null | Promise<string> };
+  const createUrl = owner.blobToURL.bind(owner);
+  owner.blobToURL = (blob: Blob, path: string) => {
+    if (disposed) return null;
+    const result = createUrl(blob, path);
+    if (typeof result === "string" && result.startsWith("blob:")) urls.add(result);
+    return result;
+  };
+  signal?.addEventListener("abort", destroy, { once: true });
+  try {
+    ensureReadingMargins(document.documentPart?.body, true);
+    const correctedCells = normalizeTableCellTextDirections(document.documentPart?.body);
+    const nodes = await renderDocument(document, options);
+    signal?.throwIfAborted();
 
-  bodyContainer.replaceChildren();
-  if (styleContainer !== bodyContainer) styleContainer.replaceChildren();
+    bodyContainer.replaceChildren();
+    if (styleContainer !== bodyContainer) styleContainer.replaceChildren();
 
-  for (const node of nodes) {
-    const container = node.nodeName === "STYLE" ? styleContainer : bodyContainer;
-    container.appendChild(node);
+    for (const node of nodes) {
+      const container = node.nodeName === "STYLE" ? styleContainer : bodyContainer;
+      container.appendChild(node);
+    }
+
+    if (correctedCells > 0) {
+      console.info(`Normalized horizontal text direction in ${correctedCells} table cells.`);
+    }
+
+    return Object.assign(document, { destroy });
+  } catch (error) {
+    destroy();
+    throw error;
   }
-
-  if (correctedCells > 0) {
-    console.info(`Normalized horizontal text direction in ${correctedCells} table cells.`);
-  }
-
-  return document;
 }

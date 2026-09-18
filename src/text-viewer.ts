@@ -357,6 +357,12 @@ function countLines(text: string): number {
   return lines;
 }
 
+function lineNumberText(lineCount: number): string {
+  const numbers = new Array<string>(lineCount);
+  for (let line = 0; line < lineCount; line += 1) numbers[line] = String(line + 1);
+  return numbers.join("\n");
+}
+
 function safeLinkTarget(target: string): string | null {
   if (target.startsWith("#")) return target;
   try {
@@ -688,6 +694,7 @@ export async function renderTextViewer(
     viewer.append(notice);
   }
 
+  const lineCount = countLines(text);
   if (renderFormattedMarkdown) {
     viewer.append(renderMarkdown(text));
   } else if (isSubtitle && highlighted) {
@@ -702,7 +709,19 @@ export async function renderTextViewer(
       code.textContent = text;
     }
     pre.append(code);
-    viewer.append(pre);
+    if (language && !isMarkdown && !isSubtitle) {
+      const frame = document.createElement("div");
+      frame.className = "code-frame";
+      const lineNumbers = document.createElement("pre");
+      lineNumbers.className = "code-line-numbers";
+      lineNumbers.setAttribute("aria-hidden", "true");
+      lineNumbers.textContent = lineNumberText(lineCount);
+      pre.className = "code-content";
+      frame.append(lineNumbers, pre);
+      viewer.append(frame);
+    } else {
+      viewer.append(pre);
+    }
   }
   host.classList.add("is-text");
   host.append(viewer);
@@ -710,7 +729,7 @@ export async function renderTextViewer(
   return {
     encoding,
     highlighted,
-    lineCount: countLines(text),
+    lineCount,
     truncated,
   };
 }

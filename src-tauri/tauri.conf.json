@@ -21,9 +21,13 @@
         "center": true,
         "resizable": true,
         "fullscreen": false,
+        "transparent": true,
         "dragDropEnabled": false,
         "visible": false,
-        "backgroundColor": "#202020"
+        "backgroundColor": "#00000000",
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
       }
     ],
     "security": {

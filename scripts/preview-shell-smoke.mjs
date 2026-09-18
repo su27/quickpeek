@@ -6,13 +6,24 @@ import { join, resolve, extname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 const marginFixtures = new Map();
 const marginCases = [['zero', 32, 2], ['missing', 32, 2], ['normal', 96, 2]];
+const workbook = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Name', 'Count'], ['Sample', 42]]), 'Sheet');
+for (const type of ['xlsx', 'xls', 'csv']) marginFixtures.set(`/fixture-sheet.${type}`, XLSX.write(workbook, { type: 'buffer', bookType: type }));
 for (const [name, margin] of [['zero', '0'], ['normal', '1440'], ['missing', null]]) {
   const zip = await JSZip.loadAsync(readFileSync(new URL('../fixtures/documents/sample.docx', import.meta.url)));
   const xml = await zip.file('word/document.xml').async('string');
   zip.file('word/document.xml', xml.replace(/<w:pgMar\b[^>]*\/>/g, margin === null ? ''
     : `<w:pgMar w:top="${margin}" w:right="${margin}" w:bottom="${margin}" w:left="${margin}" w:header="0" w:footer="0" w:gutter="0"/>`));
+  zip.file('word/media/pixel.png', readFileSync(new URL('../src-tauri/icons/32x32.png', import.meta.url)));
+  const rels = await zip.file('word/_rels/document.xml.rels').async('string');
+  zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>', '<Relationship Id="rIdTestImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>'));
+  const types = await zip.file('[Content_Types].xml').async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>'));
+  const body = await zip.file('word/document.xml').async('string');
+  zip.file('word/document.xml', body.replace('</w:body>', '<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="9525" cy="9525"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="pixel"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdTestImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body>'));
   marginFixtures.set(`/fixture-${name}.docx`, await zip.generateAsync({type: 'nodebuffer'}));
 }
 if (process.env.QUICKPEEK_DOCX_FIXTURE) {
@@ -55,6 +66,10 @@ try {
   const result = await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, timeout: 15000, expression: `(async () => {
     const assert = (value, message) => { if (!value) throw new Error(message); };
     const workspace = document.querySelector('#workspace');
+    const urls = new Set();let created = 0;
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = blob => { const url = create(blob); urls.add(url); created++; return url; };
+    URL.revokeObjectURL = url => { urls.delete(url); revoke(url); };
     assert(document.documentElement.lang === 'en', 'page language is not English');
     assert(document.querySelector('#searchInput').placeholder === 'Find in document', 'search prompt is not English');
     assert(!document.querySelector('#emptyState, #emptyOpenButton, .empty-state'), 'retired welcome page retained');
@@ -92,7 +107,20 @@ try {
         assert(page.getBoundingClientRect().width < 900, 'missing page width stretched the paragraph');
       }
     }
-    return { retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true,
+    for (const type of ['xlsx', 'xls', 'csv']) {
+      const name = 'sheet.'+type;
+      const bytes = await fetch('/fixture-'+name).then(r=>r.arrayBuffer());
+      const transfer = new DataTransfer();transfer.items.add(new File([bytes], name));
+      const input=document.querySelector('#fileInput');input.files=transfer.files;input.dispatchEvent(new Event('change'));
+      const end=performance.now()+10000;
+      while(!document.title.startsWith(name)||!document.querySelector('.excel-viewer')) {if(performance.now()>end)throw Error('Workbook did not render '+name);await new Promise(requestAnimationFrame);}
+    }
+    const transfer = new DataTransfer();transfer.items.add(new File(['after images'], 'final.txt'));
+    const input = document.querySelector('#fileInput');input.files=transfer.files;input.dispatchEvent(new Event('change'));
+    const end = performance.now()+5000;
+    while (!document.title.startsWith('final.txt')) { if(performance.now()>end)throw Error('final preview timeout');await new Promise(requestAnimationFrame); }
+    assert(created >= 3 && urls.size === 0, 'DOCX images leaked after switching: '+urls.size);
+    return { xlsxXlsCsvRendered: true, docxBlobUrlsReleased: true, retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true,
       docxZeroAndMissingMargins: true, docxOriginalMarginsPreserved: true };
   })()` });
   assert.ok(!result.error && !result.result.exceptionDetails, JSON.stringify(result));

@@ -1,9 +1,12 @@
 use std::{
     collections::VecDeque,
     ffi::c_void,
+    io::{BufRead, BufReader, Write},
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Sender},
         Mutex, OnceLock,
     },
@@ -43,10 +46,29 @@ use windows::{
 const PREVIEW_HANDLER_SHELLEX_KEY: &str = r"shellex\{8895b1c6-b41f-4c1c-a562-0d564250836f}";
 const WM_QUICKPEEK_PREVIEW_HANDLER_ACTION: u32 = WM_APP + 0x61;
 const WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE: u32 = WM_APP + 0x62;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const WM_HELPER_SHOW: u32 = WM_APP + 0x63;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
-static THREAD_ID: AtomicU32 = AtomicU32::new(0);
-static ACTIONS: OnceLock<Mutex<VecDeque<Action>>> = OnceLock::new();
+struct HostThread {
+    thread_id: AtomicU32,
+    actions: OnceLock<Mutex<VecDeque<Action>>>,
+    responsive: AtomicBool,
+}
+impl HostThread {
+    const fn new() -> Self {
+        Self {
+            thread_id: AtomicU32::new(0),
+            actions: OnceLock::new(),
+            responsive: AtomicBool::new(true),
+        }
+    }
+    fn actions(&self) -> &Mutex<VecDeque<Action>> {
+        self.actions.get_or_init(|| Mutex::new(VecDeque::new()))
+    }
+}
+static RTF_HOST: HostThread = HostThread::new();
+static COM_HOST: HostThread = HostThread::new();
+static RTF_GENERATION: AtomicU32 = AtomicU32::new(u32::MAX);
 
 enum Action {
     Prepare {
@@ -63,16 +85,12 @@ enum Action {
     },
 }
 
-fn action_queue() -> &'static Mutex<VecDeque<Action>> {
-    ACTIONS.get_or_init(|| Mutex::new(VecDeque::new()))
-}
-
-fn post_action(action: Action) -> Result<(), String> {
-    let thread_id = THREAD_ID.load(Ordering::SeqCst);
+fn post_action(host: &HostThread, action: Action) -> Result<(), String> {
+    let thread_id = host.thread_id.load(Ordering::SeqCst);
     if thread_id == 0 {
         return Err("Windows preview host is not ready".to_string());
     }
-    action_queue()
+    host.actions()
         .lock()
         .map_err(|_| "System preview queue is unavailable".to_string())?
         .push_back(action);
@@ -90,7 +108,11 @@ fn post_action(action: Action) -> Result<(), String> {
 
 // The deadline is a failure limit, not a rendering delay. Cancellation is checked
 // even while a third-party COM server is busy, so later files can still load.
-fn wait_for_reply(receiver: mpsc::Receiver<bool>, generation: u32) -> Result<bool, String> {
+fn wait_for_reply(
+    host: &HostThread,
+    receiver: mpsc::Receiver<bool>,
+    generation: u32,
+) -> Result<bool, String> {
     let deadline = Instant::now() + REQUEST_TIMEOUT;
     loop {
         if !crate::preview_generation_is_current(generation) {
@@ -102,6 +124,7 @@ fn wait_for_reply(receiver: mpsc::Receiver<bool>, generation: u32) -> Result<boo
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(false),
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
             Err(_) => {
+                host.responsive.store(false, Ordering::SeqCst);
                 let _ = unload(Some(generation));
                 return Err("Windows preview handler timed out".to_string());
             }
@@ -113,48 +136,87 @@ pub fn prepare(path: PathBuf, generation: u32) -> Result<bool, String> {
     if !crate::preview_generation_is_current(generation) {
         return Ok(false);
     }
+    let rtf = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rtf"));
+    let host = if rtf { &RTF_HOST } else { &COM_HOST };
+    if !host.responsive.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    RTF_GENERATION.store(if rtf { generation } else { u32::MAX }, Ordering::SeqCst);
     let (sender, receiver) = mpsc::channel();
-    post_action(Action::Prepare {
-        path,
-        generation,
-        reply: sender,
-    })?;
-    wait_for_reply(receiver, generation)
+    post_action(
+        host,
+        Action::Prepare {
+            path,
+            generation,
+            reply: sender,
+        },
+    )?;
+    wait_for_reply(host, receiver, generation)
 }
 
 pub fn activate(generation: u32) -> Result<bool, String> {
+    let host = if RTF_GENERATION.load(Ordering::SeqCst) == generation {
+        &RTF_HOST
+    } else {
+        &COM_HOST
+    };
     let (sender, receiver) = mpsc::channel();
-    post_action(Action::Activate {
-        generation,
-        reply: sender,
-    })?;
-    wait_for_reply(receiver, generation)
+    post_action(
+        host,
+        Action::Activate {
+            generation,
+            reply: sender,
+        },
+    )?;
+    wait_for_reply(host, receiver, generation)
 }
 
 pub fn unload(generation: Option<u32>) -> Result<(), String> {
-    if THREAD_ID.load(Ordering::SeqCst) == 0 {
-        return Ok(());
+    for host in [&RTF_HOST, &COM_HOST] {
+        if host.thread_id.load(Ordering::SeqCst) != 0 {
+            // Coalesce obsolete work: a stalled extension must not accumulate a
+            // request for every selection made while it is unresponsive.
+            if let Ok(mut queue) = host.actions().lock() {
+                queue.retain(|action| match action {
+                    Action::Prepare { generation: g, .. }
+                    | Action::Activate { generation: g, .. } => {
+                        generation.is_some_and(|id| *g != id)
+                    }
+                    Action::Unload { .. } => false,
+                });
+            }
+            post_action(host, Action::Unload { generation })?;
+        }
     }
-    post_action(Action::Unload { generation })
+    Ok(())
 }
 
 pub fn resize() {
-    let thread_id = THREAD_ID.load(Ordering::SeqCst);
-    if thread_id == 0 {
-        return;
-    }
-    unsafe {
-        let _ = PostThreadMessageW(
-            thread_id,
-            WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE,
-            Default::default(),
-            Default::default(),
-        );
+    for host in [&RTF_HOST, &COM_HOST] {
+        let thread_id = host.thread_id.load(Ordering::SeqCst);
+        if thread_id == 0 {
+            continue;
+        }
+        unsafe {
+            let _ = PostThreadMessageW(
+                thread_id,
+                WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE,
+                Default::default(),
+                Default::default(),
+            );
+        }
     }
 }
 
 pub fn start(parent: HWND) {
-    if THREAD_ID.load(Ordering::SeqCst) != 0 {
+    start_host(parent, &RTF_HOST);
+    start_host(parent, &COM_HOST);
+}
+
+fn start_host(parent: HWND, host: &'static HostThread) {
+    if host.thread_id.load(Ordering::SeqCst) != 0 {
         return;
     }
     let parent_value = parent.0 as isize;
@@ -174,7 +236,7 @@ pub fn start(parent: HWND) {
         // PostThreadMessage requires the target thread to own a message queue.
         let mut bootstrap_message = MSG::default();
         let _ = PeekMessageW(&mut bootstrap_message, None, 0, 0, PM_NOREMOVE);
-        THREAD_ID.store(
+        host.thread_id.store(
             windows::Win32::System::Threading::GetCurrentThreadId(),
             Ordering::SeqCst,
         );
@@ -185,7 +247,8 @@ pub fn start(parent: HWND) {
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             if message.message == WM_QUICKPEEK_PREVIEW_HANDLER_ACTION {
                 loop {
-                    let action = action_queue()
+                    let action = host
+                        .actions()
                         .lock()
                         .ok()
                         .and_then(|mut queue| queue.pop_front());
@@ -213,6 +276,7 @@ pub fn start(parent: HWND) {
                             controller.unload(generation);
                         }
                     }
+                    host.responsive.store(true, Ordering::SeqCst);
                 }
             } else if message.message == WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE {
                 controller.resize(parent);
@@ -223,7 +287,7 @@ pub fn start(parent: HWND) {
         }
 
         controller.unload(None);
-        THREAD_ID.store(0, Ordering::SeqCst);
+        host.thread_id.store(0, Ordering::SeqCst);
         CoUninitialize();
     });
 
@@ -292,7 +356,10 @@ impl PreviewHandlerController {
 
     fn resize(&mut self, parent: HWND) {
         if let Some(active) = self.active.as_ref() {
-            if let Err(error) = active.resize(parent, true) {
+            if let Err(error) = active.resize(
+                parent,
+                crate::preview_generation_is_current(active.generation),
+            ) {
                 crate::diagnostic_log(&format!("Could not resize Windows preview window: {error}"));
             }
         }
@@ -326,6 +393,8 @@ struct PreviewHandlerHost {
     // Some preview handlers keep reading lazily after DoPreview returns.
     _stream: Option<IStream>,
     _rtf: Option<crate::windows_rtf::RtfLibrary>,
+    helper: Option<Child>,
+    helper_thread: u32,
 }
 
 impl PreviewHandlerHost {
@@ -343,11 +412,27 @@ impl PreviewHandlerHost {
                 host_window,
                 _stream: None,
                 _rtf: Some(library),
+                helper: None,
+                helper_thread: 0,
             }));
         }
         if !["doc", "ppt", "pps", "pot"].contains(&extension.as_str()) {
             return Ok(None);
         }
+
+        Self::open_helper(parent, path, generation)
+            .map(Some)
+            .map_err(|error| {
+                windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), error)
+            })
+    }
+
+    fn open_com(parent: HWND, path: &Path) -> windows::core::Result<Option<Self>> {
+        let extension = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
 
         let Some(clsid) = preview_handler_clsid(&format!(".{extension}"))? else {
             return Ok(None);
@@ -388,11 +473,13 @@ impl PreviewHandlerHost {
         // Establish ownership before fallible COM calls; both SetWindow and
         // DoPreview failures must Unload and destroy the native child.
         let mut host = Self {
-            generation,
+            generation: 0,
             handler: Some(handler),
             host_window,
             _stream: None,
             _rtf: None,
+            helper: None,
+            helper_thread: 0,
         };
         let (initialized, stream) = initialize_handler(&instance, path);
         host._stream = stream;
@@ -411,6 +498,16 @@ impl PreviewHandlerHost {
     }
 
     fn show(&self) -> windows::core::Result<()> {
+        if self.helper.is_some() {
+            return unsafe {
+                PostThreadMessageW(
+                    self.helper_thread,
+                    WM_HELPER_SHOW,
+                    Default::default(),
+                    Default::default(),
+                )
+            };
+        }
         unsafe {
             let _ = ShowWindow(self.host_window, SW_SHOWNOACTIVATE);
             SetWindowPos(
@@ -426,6 +523,16 @@ impl PreviewHandlerHost {
     }
 
     fn resize(&self, parent: HWND, show: bool) -> windows::core::Result<()> {
+        if self.helper.is_some() {
+            return unsafe {
+                PostThreadMessageW(
+                    self.helper_thread,
+                    WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE,
+                    windows::Win32::Foundation::WPARAM(usize::from(show)),
+                    Default::default(),
+                )
+            };
+        }
         let mut bounds = RECT::default();
         unsafe { GetClientRect(parent, &mut bounds)? };
         let width = (bounds.right - bounds.left).max(1);
@@ -465,6 +572,13 @@ impl PreviewHandlerHost {
 
 impl Drop for PreviewHandlerHost {
     fn drop(&mut self) {
+        if let Some(mut child) = self.helper.take() {
+            // The helper owns COM and its windows. A hung Unload must never hold
+            // the main application's STA or retain third-party DLLs indefinitely.
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
         unsafe {
             let _ = ShowWindow(self.host_window, SW_HIDE);
             if let Some(handler) = &self.handler {
@@ -473,6 +587,142 @@ impl Drop for PreviewHandlerHost {
             let _ = DestroyWindow(self.host_window);
         }
     }
+}
+
+impl PreviewHandlerHost {
+    fn open_helper(parent: HWND, path: &Path, generation: u32) -> Result<Self, String> {
+        #[cfg(not(test))]
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        let executable = PathBuf::from(
+            std::env::var_os("QUICKPEEK_HELPER_EXE")
+                .ok_or("Set QUICKPEEK_HELPER_EXE to the built application")?,
+        );
+        let mut child = Command::new(executable)
+            .arg("--quickpeek-preview-helper")
+            .arg((parent.0 as usize).to_string())
+            .arg(path)
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Could not start isolated preview: {e}"))?;
+        let stdout = child.stdout.take().ok_or("Missing preview pipe")?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let _ = sender.send(result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready = loop {
+            if !crate::preview_generation_is_current(generation) || Instant::now() >= deadline {
+                break Err("Isolated preview cancelled or timed out".to_string());
+            }
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(line)) => {
+                    let values: Vec<_> = line.split_whitespace().collect();
+                    let parsed = if values.len() == 3 && values[0] == "READY" {
+                        values[1]
+                            .parse::<u32>()
+                            .ok()
+                            .zip(values[2].parse::<usize>().ok())
+                    } else {
+                        None
+                    };
+                    break parsed.ok_or_else(|| {
+                        "System preview handler could not open this file".to_string()
+                    });
+                }
+                Ok(Err(error)) => break Err(error.to_string()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err("Preview helper exited".into())
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        match ready {
+            Ok((helper_thread, handle)) => Ok(Self {
+                generation,
+                handler: None,
+                host_window: HWND(handle as *mut c_void),
+                _stream: None,
+                _rtf: None,
+                helper: Some(child),
+                helper_thread,
+            }),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Entered before Tauri/single-instance initialization; only this child loads COM extensions.
+pub fn run_helper_if_requested() -> bool {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args
+        .get(1)
+        .is_none_or(|arg| arg != "--quickpeek-preview-helper")
+    {
+        return false;
+    }
+    let Some(parent_value) = args
+        .get(2)
+        .and_then(|arg| arg.to_str())
+        .and_then(|s| s.parse::<usize>().ok())
+    else {
+        return true;
+    };
+    let Some(path) = args.get(3) else {
+        return true;
+    };
+    unsafe {
+        let parent = HWND(parent_value as *mut c_void);
+        if !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(parent)).as_bool() {
+            return true;
+        }
+        let _ = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(parent));
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+            return true;
+        }
+        let mut message = MSG::default();
+        let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+        // Also exit if the parent disappears while an extension is blocked.
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(HWND(
+                parent_value as *mut c_void,
+            )))
+            .as_bool()
+            {
+                std::process::exit(0);
+            }
+        });
+        if let Ok(Some(host)) = PreviewHandlerHost::open_com(parent, Path::new(path)) {
+            println!(
+                "READY {} {}",
+                windows::Win32::System::Threading::GetCurrentThreadId(),
+                host.host_window.0 as usize
+            );
+            let _ = std::io::stdout().flush();
+            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                if message.message == WM_HELPER_SHOW {
+                    let _ = host.show();
+                } else if message.message == WM_QUICKPEEK_PREVIEW_HANDLER_RESIZE {
+                    let _ = host.resize(parent, message.wParam.0 != 0);
+                } else {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+        CoUninitialize();
+    }
+    true
 }
 
 fn initialize_handler(instance: &IUnknown, path: &Path) -> (bool, Option<IStream>) {

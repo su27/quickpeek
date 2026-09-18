@@ -70,6 +70,7 @@ type StyleAwarePreviewOptions = ExcelPreviewOptions & {
 };
 
 type ExcelViewerOptions = {
+  signal?: AbortSignal;
   convertWorkbook: boolean;
   onSheetChange: (index: number, count: number) => void;
 };
@@ -80,12 +81,17 @@ function cellText(value: unknown): string {
 }
 
 function normalizeSheetDimensions(sheets: PreviewSheet[]): PreviewSheet[] {
+  if (sheets.length > 128) throw new Error("Workbook has too many sheets to preview");
+  let cells = 0;
   for (const sheet of sheets) {
+    if (Number(sheet.rows.len) > 100000 || Number(sheet.cols.len) > 512) throw new Error("Worksheet exceeds the preview dimensions limit");
     let lastPopulatedColumn = -1;
     for (const [rowKey, rowValue] of Object.entries(sheet.rows)) {
       if (rowKey === "len" || typeof rowValue !== "object" || !rowValue?.cells) continue;
+      if (Number(rowKey) >= 100000 || (cells += Object.keys(rowValue.cells).length) > 200000) throw new Error("Workbook exceeds the preview complexity limit");
       for (const columnKey of Object.keys(rowValue.cells)) {
         const column = Number(columnKey);
+        if (column >= 512) throw new Error("Worksheet exceeds the preview dimensions limit");
         if (Number.isInteger(column) && column >= 0) {
           lastPopulatedColumn = Math.max(lastPopulatedColumn, column);
         }
@@ -183,12 +189,13 @@ export async function renderExcelViewer(
   let legacyLayout: LegacySheetLayout[] | null = null;
   if (options.convertWorkbook) {
     try {
-      const { prepareLegacyWorkbook } = await import("./legacy-excel-layout");
-      const prepared = await prepareLegacyWorkbook(input);
+      const { convertLegacyWorkbook } = await import("./legacy-excel-input");
+      const prepared = await convertLegacyWorkbook(input, options.signal ?? abortController.signal);
       previewInput = prepared.workbook;
       legacyLayout = prepared.layout;
     } catch (error) {
-      console.warn("Could not preserve legacy Excel layout; using compatibility mode", error);
+      root.remove();
+      throw error;
     }
   }
 
@@ -204,26 +211,48 @@ export async function renderExcelViewer(
     },
   };
   const previewer = jsPreviewExcel.init(root, previewOptions) as ExcelPreviewInternals;
-
-  try {
-    await previewer.preview(previewInput);
-  } catch (error) {
+  let previewerDisposed = false;
+  let previewUrl: string | undefined;
+  const disposePreviewer = (): void => {
+    if (previewerDisposed) return;
+    previewerDisposed = true;
+    options.signal?.removeEventListener("abort", disposePreviewer);
     abortController.abort();
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = undefined; }
     previewer.destroy();
     root.remove();
+  };
+  options.signal?.addEventListener("abort", disposePreviewer, { once: true });
+
+  // The library creates an unowned Blob URL when passed an ArrayBuffer.
+  // Supply our own URL so success, cancellation and failure all release it.
+  previewUrl = URL.createObjectURL(new Blob([previewInput]));
+  try {
+    options.signal?.throwIfAborted();
+    await previewer.preview(previewUrl);
+    options.signal?.throwIfAborted();
+  } catch (error) {
+    disposePreviewer();
     throw error;
+  } finally {
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = undefined; }
   }
 
   workbookData = workbookData.length > 0 ? workbookData : (previewer.xs?.getData?.() ?? []);
   if (workbookData.length === 0) {
-    previewer.destroy();
-    root.remove();
+    disposePreviewer();
     throw new Error("This workbook has no worksheets");
   }
 
   let searchMatches: ExcelSearchMatch[] = [];
   let currentSearchMatch = -1;
   let resizeFrame = 0;
+  let destroyed = false;
+  const frames = new Set<number>();
+  const schedule = (callback: () => void): void => {
+    const id = requestAnimationFrame(() => { frames.delete(id); if (!destroyed) callback(); });
+    frames.add(id);
+  };
 
   const resizeObserver = new ResizeObserver(() => {
     if (resizeFrame) cancelAnimationFrame(resizeFrame);
@@ -256,7 +285,7 @@ export async function renderExcelViewer(
     if (!match) return;
     selectSheet(match.sheet);
 
-    requestAnimationFrame(() => {
+    schedule(() => {
       const spreadsheet = previewer.xs;
       const sheet = spreadsheet?.sheet;
       const data = spreadsheet?.datas?.[match.sheet];
@@ -266,7 +295,7 @@ export async function renderExcelViewer(
       const left = data.cols.sumWidth(0, match.column);
       sheet.verticalScrollbar?.move({ top: Math.max(0, top - 80) });
       sheet.horizontalScrollbar?.move({ left: Math.max(0, left - 120) });
-      requestAnimationFrame(() => {
+      schedule(() => {
         sheet.selector?.set(match.row, match.column, true);
         sheet.table?.render();
       });
@@ -284,7 +313,7 @@ export async function renderExcelViewer(
     "click",
     (event) => {
       if ((event.target as Element).closest(".x-spreadsheet-bottombar li")) {
-        requestAnimationFrame(syncSheetStatus);
+        schedule(syncSheetStatus);
       }
     },
     { signal: abortController.signal },
@@ -299,11 +328,13 @@ export async function renderExcelViewer(
       currentSearchMatch = -1;
     },
     destroy() {
+      destroyed = true;
+      for (const frame of frames) cancelAnimationFrame(frame);
+      frames.clear();
       abortController.abort();
       resizeObserver.disconnect();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
-      previewer.destroy();
-      root.remove();
+      disposePreviewer();
     },
     getPageLabel() {
       return `${currentSheetIndex() + 1} / ${workbookData.length}`;

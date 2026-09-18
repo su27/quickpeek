@@ -1,7 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PreviewDimensions } from "./document-formats";
+import { previewTask } from "./preview-task";
+import { PreviewWorkQueue } from "./preview-work-queue";
 
 const MAX_RETAINED_PAGES = 7;
+const pdfWork = new PreviewWorkQueue(1);
 
 export type PdfViewerResult = {
   dimensions: PreviewDimensions | null;
@@ -28,7 +31,12 @@ async function renderNativePdf(
   previewWidth: number | undefined,
   host: HTMLElement,
   onPageChange: (page: number, count: number) => void,
+  parentSignal: AbortSignal,
+  generation?: number,
 ): Promise<PdfViewerResult> {
+  const cancellation = new AbortController();
+  const signal = AbortSignal.any([parentSignal, cancellation.signal]);
+  signal.throwIfAborted();
   host.classList.add("is-pdf", "is-native-pdf");
   const viewer = document.createElement("div");
   viewer.className = "pdf-native-viewer";
@@ -52,12 +60,18 @@ async function renderNativePdf(
   let destroyed = false;
   const rendered = new Set<number>();
   const rendering = new Map<number, Promise<void>>();
+  const pageCancellations = new Map<number, AbortController>();
   const nearby = new Set<number>();
   const visibleRatios = new Map<number, number>();
   const renderOrder: number[] = [];
+  const widths = new Map<number, number>();
+  const targetWidth = (): number => Math.min(4096, Math.ceil(Math.max(64, viewer.clientWidth > 0 ? viewer.clientWidth - 16 : (previewWidth ?? 850) - 16) * window.devicePixelRatio));
+  const abort = (): void => { destroyed = true; for (const { image } of pageElements) image.removeAttribute("src"); };
+  signal.addEventListener("abort", abort, { once: true });
 
   const evictDistantPages = () => {
-    while (rendered.size > MAX_RETAINED_PAGES) {
+    const pixels = () => [...rendered].reduce((sum, i) => sum + pageElements[i].image.naturalWidth * pageElements[i].image.naturalHeight, 0);
+    while (rendered.size > MAX_RETAINED_PAGES || pixels() > 12_000_000) {
       const candidatePosition = renderOrder.findIndex((index) => !nearby.has(index));
       if (candidatePosition < 0) return;
       const [candidate] = renderOrder.splice(candidatePosition, 1);
@@ -70,38 +84,48 @@ async function renderNativePdf(
   };
 
   const renderPage = (index: number): Promise<void> => {
-    if (destroyed || rendered.has(index)) return Promise.resolve();
+    if (destroyed || (rendered.has(index) && widths.get(index) === targetWidth())) return Promise.resolve();
     const pending = rendering.get(index);
     if (pending) return pending;
     const entry = pageElements[index];
     if (!entry) return Promise.resolve();
+    const pageCancellation = new AbortController();
+    pageCancellations.set(index, pageCancellation);
+    const pageSignal = AbortSignal.any([signal, pageCancellation.signal]);
 
     const task = (async () => {
       entry.errorLabel.hidden = true;
       // A first preview is rendered while the document viewport is display:none,
       // so clientWidth can be zero. Use the already-computed window width rather
       // than accidentally rasterizing the first page at the 64px fallback size.
-      const measuredWidth = viewer.clientWidth > 0 ? viewer.clientWidth - 16 : 0;
-      const cssWidth = Math.max(64, previewWidth ? previewWidth - 16 : measuredWidth);
-      const targetWidth = Math.min(4096, Math.ceil(cssWidth * window.devicePixelRatio));
-      const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("render_pdf_page", {
+      const requestedWidth = targetWidth();
+      // Waiting for the lane is not rendering time. Native operations have
+      // their own deadline; keep the lane occupied until they actually settle.
+      const payload = await pdfWork.run(pageSignal, () => invoke<ArrayBuffer | Uint8Array | number[]>("render_pdf_page", {
         pageIndex: index,
         path,
-        targetWidth,
+        targetWidth: requestedWidth,
+        generation,
+      }), () => {
+        const bounds = entry.page.getBoundingClientRect();
+        const viewport = viewer.getBoundingClientRect();
+        const visible = bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+        return (visible ? 0 : 1_000_000) + Math.abs((bounds.top + bounds.bottom - viewport.top - viewport.bottom) / 2);
       });
-      if (destroyed) return;
+      pageSignal.throwIfAborted();
       const imageUrl = URL.createObjectURL(
         new Blob([normalizeIpcBytes(payload)], { type: "image/png" }),
       );
       try {
         entry.image.src = imageUrl;
-        await decodeImage(entry.image);
+        await previewTask(decodeImage(entry.image), pageSignal);
       } finally {
         URL.revokeObjectURL(imageUrl);
       }
-      if (destroyed) return;
+      pageSignal.throwIfAborted();
       entry.page.classList.add("is-ready");
       rendered.add(index);
+      widths.set(index, requestedWidth);
       const previous = renderOrder.indexOf(index);
       if (previous >= 0) renderOrder.splice(previous, 1);
       renderOrder.push(index);
@@ -109,12 +133,20 @@ async function renderNativePdf(
     })().catch((error) => {
       entry.page.classList.remove("is-ready");
       entry.image.removeAttribute("src");
-      if (!destroyed) {
-        entry.errorLabel.textContent = "This page could not be displayed";
+      if (!destroyed && !pageSignal.aborted) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", () => { void renderPage(index).catch(() => {}); });
+        entry.errorLabel.replaceChildren("This page could not be displayed. ", retry);
         entry.errorLabel.hidden = false;
       }
       throw error;
-    }).finally(() => rendering.delete(index));
+    }).finally(() => {
+      rendering.delete(index);
+      pageCancellations.delete(index);
+      if (!destroyed && nearby.has(index) && (pageSignal.aborted || (rendered.has(index) && widths.get(index) !== targetWidth()))) void renderPage(index).catch(() => {});
+    });
     rendering.set(index, task);
     return task;
   };
@@ -125,6 +157,7 @@ async function renderNativePdf(
     await renderPage(0);
   } catch (error) {
     destroyed = true;
+    signal.removeEventListener("abort", abort);
     viewer.remove();
     throw error;
   }
@@ -134,13 +167,22 @@ async function renderNativePdf(
       const index = Number((entry.target as HTMLElement).dataset.pageIndex);
       if (entry.isIntersecting) {
         nearby.add(index);
-        // Later-page failures belong to their placeholder, not an unhandled
-        // rejection. Re-entering the viewport can retry the page normally.
-        void renderPage(index).catch(() => {});
       } else {
         nearby.delete(index);
+        pageCancellations.get(index)?.abort();
       }
     }
+    // Process the whole observation batch before scheduling, so old queued pages
+    // are removed and visible pages are submitted before speculative neighbors.
+    const viewport = viewer.getBoundingClientRect();
+    const ordered = [...nearby].sort((a, b) => {
+      const distance = (i: number) => {
+        const rect = pageElements[i].page.getBoundingClientRect();
+        return Math.abs((rect.top + rect.bottom - viewport.top - viewport.bottom) / 2);
+      };
+      return distance(a) - distance(b);
+    });
+    for (const index of ordered) void renderPage(index).catch(() => {});
     evictDistantPages();
   }, { root: viewer, rootMargin: "100% 0px" });
 
@@ -165,12 +207,23 @@ async function renderNativePdf(
     loadObserver.observe(page);
     pageObserver.observe(page);
   }
+  let lastWidth = targetWidth();
+  const resizeObserver = new ResizeObserver(() => {
+    const width = targetWidth();
+    if (width === lastWidth || destroyed) return;
+    lastWidth = width;
+    for (const index of nearby) void renderPage(index).catch(() => {});
+  });
+  resizeObserver.observe(viewer);
 
   return {
     dimensions: pages[0] ?? null,
     pageCount: pages.length,
     destroy() {
+      cancellation.abort();
       destroyed = true;
+      signal.removeEventListener("abort", abort);
+      resizeObserver.disconnect();
       loadObserver.disconnect();
       pageObserver.disconnect();
       for (const { image, page } of pageElements) {
@@ -190,6 +243,7 @@ async function renderBrowserPdf(
   url: string,
   dimensions: PreviewDimensions | null,
   host: HTMLElement,
+  signal: AbortSignal,
 ): Promise<PdfViewerResult> {
   const frame = document.createElement("iframe");
   frame.className = "pdf-viewer";
@@ -202,7 +256,8 @@ async function renderBrowserPdf(
   });
   frame.src = `${url}#toolbar=0&view=FitH`;
   host.append(frame);
-  await loaded;
+  try { await previewTask(loaded, signal); }
+  catch (error) { frame.src = "about:blank"; frame.remove(); throw error; }
 
   return {
     dimensions,
@@ -222,9 +277,11 @@ export async function renderPdfViewer(
   previewWidth: number | undefined,
   host: HTMLElement,
   onPageChange: (page: number, count: number) => void,
+  signal = new AbortController().signal,
+  generation?: number,
 ): Promise<PdfViewerResult> {
   if (path && pages?.length && isTauri()) {
-    return renderNativePdf(path, pages, previewWidth, host, onPageChange);
+    return renderNativePdf(path, pages, previewWidth, host, onPageChange, signal, generation);
   }
-  return renderBrowserPdf(url, dimensions, host);
+  return renderBrowserPdf(url, dimensions, host, signal);
 }

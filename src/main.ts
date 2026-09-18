@@ -1,6 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import {
-  acceptedFileExtensions,
   fileInfoDocumentFormat,
   findDocumentFormat,
   mimeTypeFor,
@@ -16,7 +15,8 @@ import {
   MIN_READABLE_IMAGE_WIDTH,
 } from "./image-layout";
 import type { SearchStatus } from "./viewer-types";
-import { PreviewCleanup, nextPreviewPaint } from "./preview-cleanup";
+import { PreviewCleanup } from "./preview-cleanup";
+import { previewTask } from "./preview-task";
 import "./style.css";
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -37,6 +37,7 @@ const previousMatch = $<HTMLButtonElement>("#previousMatch");
 const nextMatch = $<HTMLButtonElement>("#nextMatch");
 
 type ActiveDocument = {
+  generation?: number;
   format: DocumentFormat;
   isDirectory: boolean;
   name: string;
@@ -66,6 +67,7 @@ let queuedNativeRequest: NativePreviewRequest | null = null;
 let nativeLoadInProgress = false;
 let loadSequence = 0;
 let pendingLoad: AbortController | null = null;
+let latestNativeGeneration = 0;
 const previewCleanup = new PreviewCleanup();
 
 function nextLoadSequence(): number {
@@ -77,7 +79,7 @@ const MAX_PREVIEW_WORK_AREA_WIDTH = 0.94;
 const MAX_PREVIEW_WORK_AREA_HEIGHT = 0.92;
 const READING_PREVIEW_WIDTH = 850;
 
-fileInput.accept = acceptedFileExtensions();
+fileInput.accept = "";
 
 type HighlightRegistry = {
   clear(): void;
@@ -114,11 +116,7 @@ function updateWindowTitle(): void {
   lastWindowTitle = title;
   document.title = title;
   if (isTauri()) {
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) => {
-        if (lastWindowTitle !== title) return;
-        return getCurrentWindow().setTitle(title);
-      })
+    void invoke("set_preview_window_title", { title, generation: activeDocument?.generation })
       .catch((error) => console.warn("Could not update window title", error));
   }
 }
@@ -131,8 +129,6 @@ function setPageLabel(label: string): void {
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
-
-const nextPaint = nextPreviewPaint;
 
 function measurePreviewDimensions(kind: DocumentKind): { height: number; width: number } | null {
   if (activeDocument?.rendered.previewDimensions) {
@@ -169,7 +165,6 @@ async function resizeWindowForPreview(
   if (!isTauri()) return null;
 
   try {
-    if (suppliedDimensions === undefined) await nextPaint(signal);
     if (signal?.aborted) return null;
     const { currentMonitor, getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
     const monitor = await currentMonitor();
@@ -260,10 +255,13 @@ async function resizeWindowForPreview(
     const targetSize = { height: Math.round(height), width: Math.round(width) };
     if (await appWindow.isMaximized()) await appWindow.unmaximize();
     if (signal?.aborted) return null;
-    await appWindow.setSize(new LogicalSize(targetSize.width, targetSize.height));
+    const currentSize = (await appWindow.innerSize()).toLogical(monitor.scaleFactor);
     if (signal?.aborted) return null;
-    await appWindow.center();
-    await nextPaint(signal);
+    if (Math.abs(currentSize.width - targetSize.width) > 1 || Math.abs(currentSize.height - targetSize.height) > 1) {
+      await appWindow.setSize(new LogicalSize(targetSize.width, targetSize.height));
+      if (signal?.aborted) return null;
+      await appWindow.center();
+    }
     return targetSize;
   } catch (error) {
     console.warn("Could not resize preview window", error);
@@ -374,13 +372,12 @@ function keepSourceAlive(
   return {
     ...rendered,
     destroy() {
+      if (released) return;
+      released = true;
       try {
         rendered.destroy();
       } finally {
-        if (!released) {
-          released = true;
-          release();
-        }
+        release();
       }
     },
   };
@@ -488,6 +485,7 @@ function commitStagedDocument(
   documentHost = host;
 
   activeDocument = {
+    generation: source.systemGeneration,
     format,
     isDirectory: source.isDirectory === true,
     name: source.name,
@@ -520,11 +518,13 @@ async function loadPreview(
   let rendered: RenderedDocument | null = null;
   let releaseSource: (() => void) | undefined;
   const cancellation = new AbortController();
+  let committed = false;
+  const deadline = window.setTimeout(() => cancellation.abort(new Error("Preview timed out")), 20000);
   const finishCleanup = previewCleanup.begin();
   pendingLoad = cancellation;
 
   try {
-    const source = await readSource();
+    const source = await previewTask(readSource(), cancellation.signal, 20000, source => source.release?.());
     releaseSource = source.release;
     if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
@@ -534,11 +534,11 @@ async function loadPreview(
     const preflightWindow = format.kind === "pdf" || format.kind === "system";
     let preflightSize: { height: number; width: number } | null = null;
     if (preflightWindow) {
-      preflightSize = await resizeWindowForPreview(
+      preflightSize = await previewTask(resizeWindowForPreview(
         format.kind,
         format.kind === "pdf" ? source.previewDimensions ?? null : null,
         cancellation.signal,
-      );
+      ), cancellation.signal, 5000);
       if (request !== loadSequence) return false;
     }
 
@@ -546,28 +546,33 @@ async function loadPreview(
     host.className = "document-host is-staging";
     host.setAttribute("aria-hidden", "true");
     documentViewport.append(host);
-    const formatRendered = await format.render(source, {
+    const sourceRelease = releaseSource;
+    releaseSource = undefined;
+    const stagingHost = host;
+    const renderTask = Promise.resolve().then(() => format.render(source, {
       signal: cancellation.signal,
-      host,
+      host: stagingHost,
       viewport: documentViewport,
       isActive: () => host === documentHost,
       previewWidth: preflightSize?.width,
-      setPageLabel,
-      contentChanged: closeSearch,
-    });
-    rendered = keepSourceAlive(formatRendered, releaseSource);
-    releaseSource = undefined;
+      setPageLabel: label => { if (host === documentHost) setPageLabel(label); },
+      contentChanged: () => { if (host === documentHost) closeSearch(); },
+    })).then(result => keepSourceAlive(result, () => { cancellation.abort(); sourceRelease?.(); }), error => { sourceRelease?.(); throw error; });
+    rendered = await previewTask(renderTask, cancellation.signal, 20000, destroyRenderedDocument);
     if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
       return false;
     }
 
-    await rendered.activate?.();
+    await previewTask(Promise.resolve(rendered.activate?.()), cancellation.signal, 20000);
     if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
       return false;
     }
     commitStagedDocument(host, rendered, source, format);
+    committed = true;
+    window.clearTimeout(deadline);
+    if (pendingLoad === cancellation) pendingLoad = null;
     setControlsEnabled(true);
     configureControlsForFormat(format);
 
@@ -578,13 +583,17 @@ async function loadPreview(
       updatePageIndicator();
     }
 
-    if (!preflightWindow) await resizeWindowForPreview(format.kind, undefined, cancellation.signal);
-    // Preflight renderers resized before commit. They still need a paint after
-    // removing is-staging, before the native loading cover can be dismissed.
-    else await nextPaint(cancellation.signal);
+    if (!preflightWindow) await previewTask(resizeWindowForPreview(format.kind, undefined, cancellation.signal), cancellation.signal, 5000);
     return request === loadSequence && activeDocument?.rendered === rendered;
   } catch (error) {
-    if (cancellation.signal.aborted || request !== loadSequence) {
+    // Once committed, only the active-document owner may dispose this viewer.
+    if (committed) {
+      reportFrontendError(errorContext, error);
+      updateWindowTitle();
+      return request === loadSequence && activeDocument?.rendered === rendered;
+    }
+    cancellation.abort();
+    if (request !== loadSequence) {
       discardStagedDocument(host, rendered);
       return false;
     }
@@ -603,13 +612,15 @@ async function loadPreview(
     return false;
   } finally {
     if (pendingLoad === cancellation) pendingLoad = null;
+    window.clearTimeout(deadline);
     try { releaseSource?.(); } finally { finishCleanup(); }
   }
 }
 
 async function loadFile(file: File, request: number): Promise<boolean> {
-  if (isTauri()) await invoke("prepare_preview_engine");
+  const generation = isTauri() ? await invoke<number>("prepare_browser_preview") : undefined;
   if (request !== loadSequence) return false;
+  if (generation !== undefined) latestNativeGeneration = generation;
   const detectedFormat = findDocumentFormat(file.name);
   // Browser File objects do not expose a stable Windows path, so a system COM
   // preview handler cannot open a dragged legacy .doc file safely.
@@ -623,11 +634,12 @@ async function loadFile(file: File, request: number): Promise<boolean> {
     request,
     async () => {
       if (browserZip) {
-        return { type: "buffer" as const, bytes: await file.arrayBuffer(), mimeType: "application/zip", name: file.name, size: file.size };
+        return { type: "buffer" as const, bytes: await file.arrayBuffer(), mimeType: "application/zip", name: file.name, size: file.size, systemGeneration: generation };
       }
       if (format.loadMode === "metadata") {
         return {
           type: "metadata" as const,
+          systemGeneration: generation,
           mimeType: file.type || "application/octet-stream",
           modifiedAt: file.lastModified,
           name: file.name,
@@ -638,6 +650,7 @@ async function loadFile(file: File, request: number): Promise<boolean> {
         const url = URL.createObjectURL(file);
         return {
           type: "url" as const,
+          systemGeneration: generation,
           url,
           release: () => URL.revokeObjectURL(url),
           mimeType: file.type || mimeTypeFor(file.name, format),
@@ -648,8 +661,10 @@ async function loadFile(file: File, request: number): Promise<boolean> {
         };
       }
       const end = Math.min(file.size, format.maxReadBytes ?? file.size);
+      if (format.kind !== "text" && end < file.size) throw new Error("File exceeds the preview limit");
       return {
         type: "buffer" as const,
+        systemGeneration: generation,
         bytes: await file.slice(0, end).arrayBuffer(),
         mimeType: file.type || mimeTypeFor(file.name, format),
         modifiedAt: file.lastModified,
@@ -675,14 +690,13 @@ function reportFrontendError(context: string, error: unknown): void {
   void invoke("log_frontend_error", { message: `${context}: ${details}` });
 }
 
-async function loadDocumentFromPath(
+async function renderDocumentFromPath(
   preview: NativePreviewRequest,
   request: number,
 ): Promise<void> {
   const { generation, isDirectory, modifiedAt, path, size: sourceSize } = preview;
   const name = fileNameFromPath(path);
   const format = findDocumentFormat(name, isDirectory);
-  let shellIconPromise: Promise<ShellIcon | undefined> | null = null;
   const metadataSource = async (): Promise<PreviewSource> => ({
     type: "metadata",
     isDirectory,
@@ -691,7 +705,7 @@ async function loadDocumentFromPath(
     name,
     path,
     systemGeneration: generation,
-    shellIcon: await (shellIconPromise ??= loadShellIcon(path)),
+    loadShellIcon: () => loadShellIcon(path),
     size: sourceSize,
   });
 
@@ -706,7 +720,7 @@ async function loadDocumentFromPath(
         const [, pdfInfo] = await Promise.all([
           invoke("allow_preview_asset", { path }),
           format.kind === "pdf"
-            ? invoke<{ pages: Array<{ height: number; width: number }> }>("read_pdf_info", { path })
+            ? invoke<{ pages: Array<{ height: number; width: number }> }>("read_pdf_info", { path, generation })
                 .catch(() => null)
             : Promise.resolve(null),
         ]);
@@ -725,11 +739,12 @@ async function loadDocumentFromPath(
           name,
           path,
           pdfPages: pdfInfo?.pages,
+          systemGeneration: generation,
           previewDimensions,
           size: sourceSize,
         };
       }
-      const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("read_preview_file", { path });
+      const payload = await invoke<ArrayBuffer | Uint8Array | number[]>("read_preview_file", { path, generation });
       return {
         type: "buffer" as const,
         bytes: normalizeIpcBytes(payload),
@@ -738,6 +753,7 @@ async function loadDocumentFromPath(
         modifiedAt,
         name,
         path,
+        systemGeneration: generation,
         size: sourceSize,
       };
     },
@@ -769,7 +785,31 @@ async function loadDocumentFromPath(
   else if (request === loadSequence) await invoke("hide_preview_window", { generation });
 }
 
+async function loadDocumentFromPath(
+  preview: NativePreviewRequest,
+  request: number,
+): Promise<void> {
+  try {
+    await renderDocumentFromPath(preview, request);
+  } catch (error) {
+    reportFrontendError(`open ${preview.path}`, error);
+    if (request === loadSequence) {
+      if (activeDocument) {
+        showToast("Could not open this file. The previous preview is still available.", "error");
+      } else {
+        await invoke("hide_preview_window", { generation: preview.generation })
+          .catch(hideError => reportFrontendError("hide failed preview", hideError));
+      }
+    }
+  } finally {
+    await invoke("finish_preview_loading", { generation: preview.generation })
+      .catch(error => reportFrontendError("finish preview loading", error));
+  }
+}
+
 async function enqueueNativePreview(preview: NativePreviewRequest): Promise<void> {
+  if (preview.generation < latestNativeGeneration) return;
+  latestNativeGeneration = preview.generation;
   queuedNativeRequest = preview;
   nextLoadSequence();
   if (nativeLoadInProgress) return;
@@ -795,6 +835,8 @@ async function initializeNativePreview(): Promise<void> {
     void enqueueNativePreview(event.payload);
   });
   await listen<number>("preview-hidden", async (event) => {
+    if (event.payload < latestNativeGeneration) return;
+    latestNativeGeneration = event.payload;
     const request = nextLoadSequence();
     queuedNativeRequest = null;
     resetViewer();
@@ -817,7 +859,7 @@ function collectTextRanges(query: string): Range[] {
   const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
-      if (!parent || parent.closest("style, script")) return NodeFilter.FILTER_REJECT;
+      if (!parent || parent.closest('style, script, [aria-hidden="true"]')) return NodeFilter.FILTER_REJECT;
       return node.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
   });
@@ -922,9 +964,19 @@ function moveMatch(delta: 1 | -1): void {
   updateCurrentDocxHighlight();
 }
 
+function openBrowserFile(file: File): void {
+  const request = nextLoadSequence();
+  queuedNativeRequest = null;
+  void loadFile(file, request).then(async loaded => {
+    if (!loaded || request !== loadSequence) return;
+    if (isTauri()) await invoke("show_preview_window", { title: document.title, generation: activeDocument?.generation });
+    if (request === loadSequence) activeDocument?.rendered.start?.();
+  }).catch(error => { reportFrontendError("open browser file", error); showToast("Could not open this file", "error"); });
+}
+
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void loadFile(file, nextLoadSequence()).then((loaded) => { if (loaded) activeDocument?.rendered.start?.(); });
+  if (file) openBrowserFile(file);
 });
 
 documentViewport.addEventListener("scroll", () => {
@@ -976,7 +1028,7 @@ workspace.addEventListener("drop", (event) => {
   workspace.classList.remove("is-dragging");
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length > 1) showToast("Only the first supported file will be opened");
-  if (files[0]) void loadFile(files[0], nextLoadSequence()).then((loaded) => { if (loaded) activeDocument?.rendered.start?.(); });
+  if (files[0]) openBrowserFile(files[0]);
 });
 
 document.addEventListener("keydown", (event) => {

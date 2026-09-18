@@ -7,6 +7,7 @@ import {
 import type { DocumentViewerController, SearchStatus } from "./viewer-types";
 
 type PptxViewerOptions = {
+  signal?: AbortSignal;
   onSlideChange: (index: number, count: number) => void;
 };
 
@@ -16,6 +17,7 @@ export async function renderPptxViewer(
   scrollContainer: HTMLElement,
   options: PptxViewerOptions,
 ): Promise<DocumentViewerController> {
+  options.signal?.throwIfAborted();
   const container = document.createElement("section");
   container.className = "pptx-viewer";
   container.setAttribute("aria-label", "PowerPoint presentation");
@@ -64,6 +66,16 @@ export async function renderPptxViewer(
     scrollContainer,
     zipLimits: RECOMMENDED_ZIP_LIMITS,
   });
+  let disposed = false;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    options.signal?.removeEventListener("abort", dispose);
+    abortController.abort();
+    viewer.destroy();
+    container.remove();
+  };
+  options.signal?.addEventListener("abort", dispose, { once: true });
 
   try {
     await viewer.open(input, {
@@ -77,10 +89,9 @@ export async function renderPptxViewer(
       },
       renderMode: "list",
     });
+    options.signal?.throwIfAborted();
   } catch (error) {
-    abortController.abort();
-    viewer.destroy();
-    container.remove();
+    dispose();
     throw error;
   }
 
@@ -91,6 +102,7 @@ export async function renderPptxViewer(
 
   function syncVisiblePage(): void {
     pageSyncFrame = 0;
+    if (disposed) return;
     options.onSlideChange(visibleSlideIndex(viewer.currentSlideIndex), viewer.slideCount);
   }
 
@@ -140,7 +152,7 @@ export async function renderPptxViewer(
           return;
         }
         highlightHandle = handle;
-      });
+      }).catch(error => { if (!disposed) console.warn("Could not highlight slide text", error); });
   }
 
   options.onSlideChange(viewer.currentSlideIndex, viewer.slideCount);
@@ -152,8 +164,7 @@ export async function renderPptxViewer(
       abortController.abort();
       if (pageSyncFrame) cancelAnimationFrame(pageSyncFrame);
       clearSearch();
-      viewer.destroy();
-      container.remove();
+      dispose();
     },
     getPageLabel() {
       return `${visibleSlideIndex(viewer.currentSlideIndex) + 1} / ${viewer.slideCount}`;

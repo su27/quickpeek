@@ -47,8 +47,8 @@ pub fn resume(app: &AppHandle) {
 }
 
 /// HWND z-order alone does not occlude WebView2's composited surface. Hide the
-/// browser only after the frontend has committed and finished its paint barrier;
-/// hiding it earlier can stall requestAnimationFrame and prevent the commit.
+/// browser only after the frontend has committed. Preparation/layout never
+/// waits for animation frames from a hidden window.
 /// Keep the engine running so IPC/cleanup still works; resume() restores the
 /// browser before the next file is dispatched, including native-preview fallback.
 pub fn present(app: &AppHandle, generation: Option<u32>, native_preview: bool) {

@@ -30,6 +30,7 @@ use windows::{
 };
 
 const DELAY: Duration = Duration::from_millis(250);
+const MAX_DURATION: Duration = Duration::from_secs(30);
 const TIMER: usize = 0x5150;
 static PENDING: AtomicU32 = AtomicU32::new(0);
 
@@ -58,6 +59,10 @@ fn due(generation: u32, current: u32, elapsed: Duration) -> bool {
     generation == current && elapsed >= DELAY
 }
 
+fn expired(generation: u32, current: u32, elapsed: Duration) -> bool {
+    generation == current && elapsed >= MAX_DURATION
+}
+
 fn complete(pending: &AtomicU32, generation: u32) -> bool {
     pending
         .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
@@ -72,28 +77,22 @@ pub fn begin(app: &AppHandle, generation: u32, name: String) {
         started: Instant::now(),
         name,
     };
-    let _ = app.run_on_main_thread(move || {
+    let scheduled = app.run_on_main_thread(move || {
         if !crate::preview_generation_is_current(generation) {
             return;
         }
         let Some(window) = request.app.get_webview_window("main") else {
+            complete(&PENDING, generation);
+            crate::diagnostic_log("Could not start loading feedback: preview window is missing");
             return;
         };
         let Ok(owner) = window.hwnd() else {
+            complete(&PENDING, generation);
+            crate::diagnostic_log(
+                "Could not start loading feedback: preview window is unavailable",
+            );
             return;
         };
-        // Establish a hidden default before rendering starts, never at the feedback
-        // deadline: changing it at 250 ms could invalidate PDF preflight dimensions.
-        if !window.is_visible().unwrap_or(false) {
-            if let Ok(Some(monitor)) = window.current_monitor() {
-                let area = monitor.work_area();
-                let scale = monitor.scale_factor();
-                let width = (850.0_f64).min(area.size.width as f64 / scale * 0.94);
-                let height = area.size.height as f64 / scale * 0.92 - 32.0;
-                let _ = window.set_size(tauri::LogicalSize::new(width, height.max(200.0)));
-                let _ = window.center();
-            }
-        }
         // Retain an already-visible loading cover across rapid selection changes.
         // Otherwise the old document would flash through between two slow requests.
         let shown = UI.with(|ui| {
@@ -102,16 +101,21 @@ pub fn begin(app: &AppHandle, generation: u32, name: String) {
             ui.request = Some(request.clone());
             ui.shown
         });
-        if shown {
-            let _ = window.set_title(&format!("{} · Loading", request.name));
-        }
-        unsafe {
-            SetTimer(Some(owner), TIMER, if shown { 33 } else { 250 }, Some(tick));
+        let timer =
+            unsafe { SetTimer(Some(owner), TIMER, if shown { 80 } else { 250 }, Some(tick)) };
+        if timer == 0 {
+            complete(&PENDING, generation);
+            crate::diagnostic_log("Could not start the loading feedback timer");
+            clear_ui();
         }
     });
+    if let Err(error) = scheduled {
+        complete(&PENDING, generation);
+        crate::diagnostic_log(&format!("Could not schedule loading feedback: {error}"));
+    }
 }
 
-// Called on the native UI thread immediately before exposing the completed preview.
+// Called on the native UI thread when the frontend has settled this generation.
 pub fn finish(generation: u32) {
     if complete(&PENDING, generation) {
         clear_ui();
@@ -180,6 +184,9 @@ fn position_ui() {
             rect.bottom,
             SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
         );
+        // Geometry changes need one full repaint to erase the old spinner
+        // position; animation ticks invalidate only the small current spinner.
+        let _ = InvalidateRect(Some(overlay), None, false);
     }
 }
 
@@ -221,6 +228,22 @@ unsafe extern "system" fn tick(_hwnd: HWND, _message: u32, _timer: usize, _time:
         clear_ui();
         return;
     }
+    if expired(
+        request.generation,
+        PENDING.load(Ordering::SeqCst),
+        request.started.elapsed(),
+    ) {
+        if complete(&PENDING, request.generation) {
+            crate::diagnostic_log(&format!(
+                "Preview loading timed out after {} seconds: {}",
+                MAX_DURATION.as_secs(),
+                request.name
+            ));
+            clear_ui();
+            crate::hide_preview(&request.app);
+        }
+        return;
+    }
     if !shown
         && due(
             request.generation,
@@ -228,9 +251,9 @@ unsafe extern "system" fn tick(_hwnd: HWND, _message: u32, _timer: usize, _time:
             request.started.elapsed(),
         )
     {
-        let Some(window) = request.app.get_webview_window("main") else {
+        if request.app.get_webview_window("main").is_none() {
             return;
-        };
+        }
         let owner = UI.with(|ui| ui.borrow().owner);
         let mut overlay = UI.with(|ui| ui.borrow().overlay);
         if overlay.0.is_null() {
@@ -244,7 +267,6 @@ unsafe extern "system" fn tick(_hwnd: HWND, _message: u32, _timer: usize, _time:
             ui.overlay = overlay;
             ui.shown = true;
         });
-        let _ = window.set_title(&format!("{} · Loading", request.name));
         // Place the opaque native cover before showing its owner. Native child
         // handlers and a busy WebView cannot paint through this owned popup.
         position_ui();
@@ -254,14 +276,27 @@ unsafe extern "system" fn tick(_hwnd: HWND, _message: u32, _timer: usize, _time:
         crate::windows_preview::show_without_activation(&request.app);
         position_ui();
         unsafe {
-            SetTimer(Some(owner), TIMER, 33, Some(tick));
+            SetTimer(Some(owner), TIMER, 80, Some(tick));
         }
         crate::diagnostic_log("loading feedback shown after threshold");
     }
     let overlay = UI.with(|ui| ui.borrow().overlay);
     if !overlay.0.is_null() {
         unsafe {
-            let _ = InvalidateRect(Some(overlay), None, false);
+            let mut bounds = RECT::default();
+            if GetClientRect(overlay, &mut bounds).is_ok() {
+                let scale = GetDpiForWindow(overlay).max(96) as f64 / 96.0;
+                let radius = (18.0 * scale).ceil() as i32;
+                let x = bounds.right / 2;
+                let y = bounds.bottom / 2 - (14.0 * scale) as i32;
+                let spinner = RECT {
+                    left: x - radius,
+                    top: y - radius,
+                    right: x + radius,
+                    bottom: y + radius,
+                };
+                let _ = InvalidateRect(Some(overlay), Some(&spinner), false);
+            }
         }
     }
 }
@@ -342,6 +377,9 @@ mod tests {
         assert!(due(1, 1, Duration::from_millis(250)));
         assert!(!due(1, 2, Duration::from_secs(10)));
         assert!(!due(1, 0, Duration::from_secs(10)));
+        assert!(!expired(1, 1, MAX_DURATION - Duration::from_millis(1)));
+        assert!(expired(1, 1, MAX_DURATION));
+        assert!(!expired(1, 2, Duration::from_secs(60)));
     }
 
     #[test]

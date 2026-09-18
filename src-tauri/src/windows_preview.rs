@@ -5,18 +5,18 @@ use std::{
         atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
         Mutex, OnceLock,
     },
-    time::Duration,
 };
 
 use tauri::{AppHandle, Manager};
 use windows::{
     core::{w, Interface, HSTRING, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
             BeginPaint, CreateFontIndirectW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
-            DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject, InvalidateRect, LineTo,
-            MoveToEx, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY,
+            DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetPixel, GetStockObject,
+            GetTextExtentPoint32W, InvalidateRect, LineTo, MoveToEx, ReleaseDC, SelectObject,
+            SetBkMode, SetTextColor, SetWindowRgn, ANTIALIASED_QUALITY, CLR_INVALID,
             DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
             HGDIOBJ, LOGFONTW, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
         },
@@ -25,6 +25,7 @@ use windows::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
                 CLSCTX_ALL, COINIT_APARTMENTTHREADED,
             },
+            Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
             Threading::GetCurrentThreadId,
             Variant::VARIANT,
         },
@@ -44,19 +45,19 @@ use windows::{
             WindowsAndMessaging::{
                 CallNextHookEx, CallWindowProcW, CreateWindowExW, GetAncestor, GetClassNameW,
                 GetClientRect, GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowRect,
-                GetWindowTextW, GetWindowThreadProcessId, KillTimer, LoadCursorW,
-                PostThreadMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos,
-                SetWindowTextW, SetWindowsHookExW, ShowWindow, ShowWindowAsync,
-                UnhookWindowsHookEx, BS_OWNERDRAW, EVENT_OBJECT_FOCUS,
+                GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadCursorW,
+                PostThreadMessageW, SetCursor, SetLayeredWindowAttributes, SetTimer,
+                SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
+                ShowWindowAsync, UnhookWindowsHookEx, BS_OWNERDRAW, EVENT_OBJECT_FOCUS,
                 EVENT_OBJECT_SELECTIONWITHIN, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HC_ACTION,
-                HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-                SM_CXSIZE, SM_CYSIZE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-                SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
-                WINEVENT_SKIPOWNPROCESS, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETTEXT,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_POPUP,
+                HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+                LWA_COLORKEY, MSG, SM_CXSIZE, SM_CYSIZE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_STYLE,
+                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_ERASEBKGND, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+                WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
     },
@@ -66,19 +67,21 @@ const WM_QUICKPEEK_OPEN: u32 = WM_APP + 0x51;
 const WM_QUICKPEEK_REFRESH: u32 = WM_APP + 0x52;
 const WM_QUICKPEEK_HIDE: u32 = WM_APP + 0x53;
 const REFRESH_TIMER_ID: usize = 0x5145;
-
+const OPEN_BUTTON_DARK_TRANSPARENT_COLOR: COLORREF = COLORREF(0x004c_4c4c);
+const OPEN_BUTTON_LIGHT_TRANSPARENT_COLOR: COLORREF = COLORREF(0x00f0_f0f0);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static SPACE_IS_DOWN: AtomicBool = AtomicBool::new(false);
 static ESCAPE_IS_DOWN: AtomicBool = AtomicBool::new(false);
 static PREVIEW_IS_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PREVIEW_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
-static SHOW_GENERATION: AtomicU32 = AtomicU32::new(0);
 static OPEN_BUTTON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(36);
 static OPEN_BUTTON_HOVERED: AtomicBool = AtomicBool::new(false);
 static OPEN_BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
+static OPEN_BUTTON_DARK_THEME: AtomicBool = AtomicBool::new(true);
 static CURRENT_PREVIEW_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static CURRENT_WINDOW_TITLE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn preview_session_is_open() -> bool {
     PREVIEW_IS_VISIBLE.load(Ordering::SeqCst) || crate::windows_loading::is_pending()
@@ -385,6 +388,13 @@ fn open_current_preview_with_default_application() {
     };
     if result.0 as isize <= 32 {
         crate::diagnostic_log("The default Windows app could not open this file");
+    } else {
+        let hook_thread = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        if hook_thread != 0 {
+            unsafe {
+                let _ = PostThreadMessageW(hook_thread, WM_QUICKPEEK_HIDE, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 }
 
@@ -406,6 +416,74 @@ fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF(u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16))
 }
 
+fn open_button_transparent_color() -> COLORREF {
+    if OPEN_BUTTON_DARK_THEME.load(Ordering::SeqCst) {
+        OPEN_BUTTON_DARK_TRANSPARENT_COLOR
+    } else {
+        OPEN_BUTTON_LIGHT_TRANSPARENT_COLOR
+    }
+}
+
+fn sample_open_button_background(window: HWND) -> Option<COLORREF> {
+    let mut bounds = RECT::default();
+    if unsafe { GetWindowRect(window, &mut bounds) }.is_err() {
+        return None;
+    }
+    let center_x = (bounds.left + bounds.right) / 2;
+    let center_y = (bounds.top + bounds.bottom) / 2;
+    let points = [
+        (bounds.left - 3, center_y),
+        (bounds.right + 3, center_y),
+        (center_x, bounds.top - 3),
+    ];
+    let screen = unsafe { GetDC(None) };
+    if screen.0.is_null() {
+        return None;
+    }
+    let mut red = 0_u32;
+    let mut green = 0_u32;
+    let mut blue = 0_u32;
+    let mut count = 0_u32;
+    for (x, y) in points {
+        let color = unsafe { GetPixel(screen, x, y) };
+        if color.0 == CLR_INVALID {
+            continue;
+        }
+        red += color.0 & 0xff;
+        green += (color.0 >> 8) & 0xff;
+        blue += (color.0 >> 16) & 0xff;
+        count += 1;
+    }
+    unsafe {
+        let _ = ReleaseDC(None, screen);
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(rgb(
+        (red / count) as u8,
+        (green / count) as u8,
+        (blue / count) as u8,
+    ))
+}
+
+fn system_uses_dark_theme() -> Option<bool> {
+    let mut apps_use_light_theme = 1_u32;
+    let mut size = std::mem::size_of_val(&apps_use_light_theme) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            &HSTRING::from("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut apps_use_light_theme as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    status.is_ok().then_some(apps_use_light_theme == 0)
+}
+
 fn scaled(value: i32, dpi: u32) -> i32 {
     ((value as i64 * i64::from(dpi.max(96)) + 48) / 96) as i32
 }
@@ -415,13 +493,139 @@ unsafe fn create_open_button_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HF
         lfHeight: -scaled(12, dpi),
         lfWeight: 400,
         lfCharSet: DEFAULT_CHARSET,
-        lfQuality: CLEARTYPE_QUALITY,
+        // ClearType assumes an opaque background and leaves dark color fringes
+        // when composited onto Acrylic. Grayscale antialiasing stays clean here.
+        lfQuality: ANTIALIASED_QUALITY,
         ..Default::default()
     };
     let face_name: Vec<u16> = "Segoe UI Variable Text".encode_utf16().collect();
     let copy_length = face_name.len().min(descriptor.lfFaceName.len() - 1);
     descriptor.lfFaceName[..copy_length].copy_from_slice(&face_name[..copy_length]);
     unsafe { CreateFontIndirectW(&descriptor) }
+}
+
+fn window_title_store() -> &'static Mutex<Option<String>> {
+    CURRENT_WINDOW_TITLE.get_or_init(|| Mutex::new(None))
+}
+
+fn fitted_window_title(window: HWND, button: HWND, title: &str) -> String {
+    let mut window_bounds = RECT::default();
+    let mut button_bounds = RECT::default();
+    if unsafe { GetWindowRect(window, &mut window_bounds) }.is_err()
+        || unsafe { GetWindowRect(button, &mut button_bounds) }.is_err()
+    {
+        return title.to_owned();
+    }
+
+    let dpi = unsafe { GetDpiForWindow(window) }.max(96);
+    // Leave room for the app icon and a quiet gap before the custom button.
+    let available_width =
+        button_bounds.left - window_bounds.left - scaled(50, dpi) - scaled(14, dpi);
+    if available_width <= 0 {
+        return "…".to_owned();
+    }
+
+    let device_context = unsafe { GetDC(Some(window)) };
+    if device_context.0.is_null() {
+        return title.to_owned();
+    }
+    let font = unsafe { create_open_button_font(dpi) };
+    let font_object = if font.0.is_null() {
+        unsafe { GetStockObject(DEFAULT_GUI_FONT) }
+    } else {
+        HGDIOBJ(font.0)
+    };
+    let old_font = unsafe { SelectObject(device_context, font_object) };
+    let measure = |text: &str| {
+        let encoded: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE::default();
+        unsafe { GetTextExtentPoint32W(device_context, &encoded, &mut size) }
+            .as_bool()
+            .then_some(size.cx)
+    };
+
+    let result = if measure(title).is_some_and(|width| width <= available_width) {
+        title.to_owned()
+    } else {
+        // Keep a short size/status suffix visible while eliding the filename.
+        let (main, suffix) = title
+            .rsplit_once(" - ")
+            .filter(|(_, suffix)| suffix.chars().count() <= 24)
+            .map_or((title, ""), |(main, suffix)| (main, suffix));
+        let suffix = if suffix.is_empty() {
+            String::new()
+        } else {
+            format!(" - {suffix}")
+        };
+        let characters: Vec<char> = main.chars().collect();
+        let mut low = 0_usize;
+        let mut high = characters.len();
+        while low < high {
+            let middle = (low + high).div_ceil(2);
+            let candidate = format!(
+                "{}…{}",
+                characters[..middle].iter().collect::<String>(),
+                suffix
+            );
+            if measure(&candidate).is_some_and(|width| width <= available_width) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let candidate = format!(
+            "{}…{}",
+            characters[..low].iter().collect::<String>(),
+            suffix
+        );
+        if measure(&candidate).is_some_and(|width| width <= available_width) {
+            candidate
+        } else {
+            "…".to_owned()
+        }
+    };
+
+    unsafe {
+        SelectObject(device_context, old_font);
+        if !font.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+        let _ = ReleaseDC(Some(window), device_context);
+    }
+    result
+}
+
+fn refresh_window_title_handles(window: HWND, button: HWND) {
+    let title = window_title_store()
+        .lock()
+        .ok()
+        .and_then(|title| title.clone());
+    if let Some(title) = title {
+        let fitted = fitted_window_title(window, button, &title);
+        unsafe {
+            let _ = SetWindowTextW(window, &HSTRING::from(fitted));
+        }
+    }
+}
+
+pub fn set_window_title(app: &AppHandle, title: &str) {
+    if let Ok(mut current) = window_title_store().lock() {
+        *current = Some(title.to_owned());
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(window) = window.hwnd() else {
+        return;
+    };
+    let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
+    if button == 0 {
+        unsafe {
+            let _ = SetWindowTextW(window, &HSTRING::from(title));
+        }
+        return;
+    }
+    refresh_window_title_handles(window, HWND(button as *mut c_void));
 }
 
 unsafe fn paint_open_button(window: HWND) {
@@ -435,14 +639,33 @@ unsafe fn paint_open_button(window: HWND) {
         return;
     }
 
-    let background = if OPEN_BUTTON_PRESSED.load(Ordering::SeqCst) {
-        rgb(70, 70, 70)
-    } else if OPEN_BUTTON_HOVERED.load(Ordering::SeqCst) {
-        rgb(58, 58, 58)
+    let hovered = OPEN_BUTTON_HOVERED.load(Ordering::SeqCst);
+    let pressed = OPEN_BUTTON_PRESSED.load(Ordering::SeqCst);
+    let dark_theme = OPEN_BUTTON_DARK_THEME.load(Ordering::SeqCst);
+    let transparent_color = if hovered || pressed {
+        open_button_transparent_color()
     } else {
-        // The Windows 11 dark caption is #202020. Using the same color makes the
-        // popup visually disappear into the native title bar when it is idle.
-        rgb(32, 32, 32)
+        sample_open_button_background(window).unwrap_or_else(open_button_transparent_color)
+    };
+    if !hovered && !pressed {
+        unsafe {
+            let _ = SetLayeredWindowAttributes(window, transparent_color, 255, LWA_COLORKEY);
+        }
+    }
+    let background = if pressed {
+        if dark_theme {
+            rgb(70, 70, 70)
+        } else {
+            rgb(208, 208, 208)
+        }
+    } else if hovered {
+        if dark_theme {
+            rgb(58, 58, 58)
+        } else {
+            rgb(224, 224, 224)
+        }
+    } else {
+        transparent_color
     };
     let brush = unsafe { CreateSolidBrush(background) };
     unsafe {
@@ -462,10 +685,16 @@ unsafe fn paint_open_button(window: HWND) {
     };
     let icon_top = ((bounds.bottom - bounds.top - icon_size) / 2).max(0);
     let stroke = scaled(1, dpi).max(1);
-    let foreground = if OPEN_BUTTON_HOVERED.load(Ordering::SeqCst) {
-        rgb(210, 214, 220)
+    let foreground = if dark_theme {
+        if hovered {
+            rgb(218, 222, 228)
+        } else {
+            rgb(190, 195, 203)
+        }
+    } else if hovered {
+        rgb(36, 36, 36)
     } else {
-        rgb(168, 173, 181)
+        rgb(58, 58, 58)
     };
     let pen = unsafe { CreatePen(PS_SOLID, stroke, foreground) };
     let old_pen = unsafe { SelectObject(device_context, HGDIOBJ(pen.0)) };
@@ -628,7 +857,7 @@ fn install_open_button(preview_window: HWND) {
     }
     let button = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             w!("BUTTON"),
             w!(""),
             WS_POPUP | WINDOW_STYLE(BS_OWNERDRAW as u32),
@@ -646,6 +875,13 @@ fn install_open_button(preview_window: HWND) {
         crate::diagnostic_log("Could not create the default-app title bar button");
         return;
     };
+    if unsafe {
+        SetLayeredWindowAttributes(button, open_button_transparent_color(), 255, LWA_COLORKEY)
+    }
+    .is_err()
+    {
+        crate::diagnostic_log("Could not make the default-app title bar button transparent");
+    }
     let original = unsafe {
         SetWindowLongPtrW(
             button,
@@ -658,7 +894,12 @@ fn install_open_button(preview_window: HWND) {
 }
 
 fn position_open_button_handles(preview_window: HWND, button: HWND) {
-    if !PREVIEW_IS_VISIBLE.load(Ordering::SeqCst) {
+    if !PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
+        || preview_path_store()
+            .lock()
+            .map(|target| target.is_none())
+            .unwrap_or(true)
+    {
         unsafe {
             let _ = ShowWindow(button, SW_HIDE);
         }
@@ -695,7 +936,9 @@ fn position_open_button_handles(preview_window: HWND, button: HWND) {
             height,
             SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
         );
+        let _ = InvalidateRect(Some(button), None, false);
     }
+    refresh_window_title_handles(preview_window, button);
 }
 
 pub fn position_open_button(app: &AppHandle) {
@@ -728,13 +971,33 @@ pub fn set_preview_target(app: &AppHandle, path: &std::path::Path) {
         36
     };
     OPEN_BUTTON_LOGICAL_WIDTH.store(width, Ordering::SeqCst);
+    let dark_theme = system_uses_dark_theme().unwrap_or_else(|| {
+        app.get_webview_window("main")
+            .and_then(|window| window.theme().ok())
+            .is_none_or(|theme| matches!(theme, tauri::Theme::Dark))
+    });
+    OPEN_BUTTON_DARK_THEME.store(dark_theme, Ordering::SeqCst);
     let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
     if button != 0 {
         unsafe {
-            let _ = SetWindowTextW(HWND(button as *mut c_void), &HSTRING::from(label));
+            let button = HWND(button as *mut c_void);
+            let _ = SetLayeredWindowAttributes(
+                button,
+                open_button_transparent_color(),
+                255,
+                LWA_COLORKEY,
+            );
+            let _ = SetWindowTextW(button, &HSTRING::from(label));
         }
         position_open_button(app);
     }
+}
+
+pub fn clear_preview_target(app: &AppHandle) {
+    if let Ok(mut target) = preview_path_store().lock() {
+        *target = None;
+    }
+    position_open_button(app);
 }
 
 unsafe fn run_hook_loop(app: AppHandle) -> windows::core::Result<()> {
@@ -843,16 +1106,10 @@ pub fn start(app: AppHandle) {
 fn raise_preview_window(window_handle: HWND) -> windows::core::Result<()> {
     unsafe {
         // The preview must leave Explorer active so arrow-key navigation keeps working.
-        // Complete visibility on the owning UI thread before re-stacking native
-        // children. Queuing even this same-thread show lets their resize/show run
-        // first, then WebView's parent-show handling can cover the native viewer.
         let own_thread = GetWindowThreadProcessId(window_handle, None)
             == windows::Win32::System::Threading::GetCurrentThreadId();
-        if own_thread {
-            let _ = ShowWindow(window_handle, SW_SHOWNOACTIVATE);
-        } else {
-            let _ = ShowWindowAsync(window_handle, SW_SHOWNOACTIVATE);
-        }
+        // Establish z-order before showing, without a second visibility operation
+        // that could interrupt the appearance transition.
         SetWindowPos(
             window_handle,
             Some(HWND_TOPMOST),
@@ -867,9 +1124,22 @@ fn raise_preview_window(window_handle: HWND) -> windows::core::Result<()> {
             }) | SWP_NOMOVE
                 | SWP_NOSIZE
                 | SWP_NOACTIVATE
-                | SWP_NOOWNERZORDER
-                | SWP_SHOWWINDOW,
-        )
+                | SWP_NOOWNERZORDER,
+        )?;
+        // Switching files in an already-visible preview must not restart a show
+        // transition. Complete same-thread visibility before re-stacking viewers:
+        // a queued show could otherwise cover the ready native child again.
+        if !IsWindowVisible(window_handle).as_bool() {
+            if own_thread {
+                // Do not use AnimateWindow here: its synchronous transition
+                // delays WebView/native-viewer presentation and the separate
+                // caption popup, causing content to pop in after the fade.
+                let _ = ShowWindow(window_handle, SW_SHOWNOACTIVATE);
+            } else {
+                let _ = ShowWindowAsync(window_handle, SW_SHOWNOACTIVATE);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -883,7 +1153,6 @@ pub fn show_without_activation(app: &AppHandle) {
 
     PREVIEW_WINDOW_HANDLE.store(window_handle.0 as isize, Ordering::SeqCst);
     PREVIEW_IS_VISIBLE.store(true, Ordering::SeqCst);
-    let generation = SHOW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     // Keep Tauri/tao's own window state in sync with the native z-order. Without
     // this, a later first-frame window update may restore tao's stale non-topmost state.
     if let Err(error) = window.set_always_on_top(true) {
@@ -898,37 +1167,10 @@ pub fn show_without_activation(app: &AppHandle) {
     // z-order operation; raising the owner afterwards can hide it until activation.
     position_open_button(app);
     crate::windows_preview_handler::resize();
-    crate::windows_loading::reposition(app);
-
-    let window_handle_value = window_handle.0 as isize;
-    let loading_app = app.clone();
-    std::thread::spawn(move || {
-        // The first WebView composition/frame can finish after the initial native show.
-        // Cover that startup-only race without activating the preview or stealing
-        // Explorer's keyboard focus.
-        for delay in [25_u64, 90, 240] {
-            std::thread::sleep(Duration::from_millis(delay));
-            if !PREVIEW_IS_VISIBLE.load(Ordering::SeqCst)
-                || SHOW_GENERATION.load(Ordering::SeqCst) != generation
-            {
-                return;
-            }
-            let delayed_window = HWND(window_handle_value as *mut c_void);
-            let _ = raise_preview_window(delayed_window);
-            let button = OPEN_BUTTON_HANDLE.load(Ordering::SeqCst);
-            if button != 0 {
-                position_open_button_handles(delayed_window, HWND(button as *mut c_void));
-            }
-            // The loading cover is another owned popup, just like the caption
-            // button. Keep it above the WebView after every owner z-order update.
-            crate::windows_loading::reposition(&loading_app);
-        }
-    });
 }
 
 pub fn clear_topmost(app: &AppHandle) {
     PREVIEW_IS_VISIBLE.store(false, Ordering::SeqCst);
-    SHOW_GENERATION.fetch_add(1, Ordering::SeqCst);
     let Some(window) = app.get_webview_window("main") else {
         return;
     };

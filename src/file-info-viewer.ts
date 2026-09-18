@@ -84,9 +84,23 @@ export function renderFileInfoViewer(
   frame.append(icon, name, type, details);
   host.classList.add("is-file-info");
   host.append(frame);
+  let destroyed = false;
+  // Decoration cannot hold up a usable file-information preview.
+  void source.loadShellIcon?.().then(shell => {
+    if (destroyed || !shell) return;
+    const canvas = document.createElement("canvas");
+    canvas.className = "file-info-shell-icon";
+    canvas.width = shell.width;
+    canvas.height = shell.height;
+    canvas.setAttribute("aria-hidden", "true");
+    canvas.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(shell.pixels), shell.width, shell.height), 0, 0);
+    icon.replaceWith(canvas);
+    icon = canvas;
+  }).catch(console.warn);
 
   return {
     destroy() {
+      destroyed = true;
       frame.remove();
     },
   };

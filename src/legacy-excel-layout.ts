@@ -295,6 +295,13 @@ export async function prepareLegacyWorkbook(input: ArrayBuffer): Promise<Prepare
     type: "array",
   });
   const workbookWithBinaryFiles = source as WorkbookWithBinaryFiles;
+  if (source.SheetNames.length > 128) throw new Error("Workbook has too many sheets to preview");
+  let cells = 0;
+  for (const name of source.SheetNames) {
+    const sheet = source.Sheets[name];
+    const range = utils.decode_range(sheet["!ref"] ?? "A1");
+    if (range.e.r >= 100000 || range.e.c >= 512 || (cells += Object.keys(sheet).length) > 200000) throw new Error("Workbook exceeds the preview complexity limit");
+  }
   const extendedFills = extractExtendedCellFills(workbookWithBinaryFiles, source.SheetNames.length);
   const layout = source.SheetNames.map((name, index) =>
     extractSheetLayout(name, source.Sheets[name], utils.decode_cell, extendedFills[index] ?? [])

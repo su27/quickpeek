@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark;
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   color: #20242a;
   background: #202020;
@@ -9,6 +10,71 @@
   --border: #dce1e7;
   --muted: #68717d;
   --toolbar: rgba(255, 255, 255, 0.96);
+  --text-shell: #f4f5f4;
+  --text-page: #fcfcfb;
+  --text-foreground: #25282d;
+  --text-heading: #171b21;
+  --text-muted: #747b85;
+  --text-subtle: #8a919a;
+  --text-border: #e1e4e5;
+  --text-soft: #f1f3f3;
+  --text-soft-hover: #f7f8f8;
+  --text-gutter: #f5f6f5;
+  --text-gutter-number: #9ba1a9;
+  --text-link: #2869b7;
+  --text-quote-border: #c8cfd5;
+  --text-notice-border: #ead89e;
+  --text-notice-foreground: #745c13;
+  --text-notice-background: #fff9df;
+  --syntax-comment: #707781;
+  --syntax-keyword: #8f398f;
+  --syntax-string: #277a49;
+  --syntax-number: #2869a7;
+  --syntax-title: #7d6229;
+  --syntax-built-in: #196f82;
+  --syntax-foreground: #25282d;
+  --syntax-addition: #2d753f;
+  --syntax-addition-background: #e9f6ec;
+  --syntax-deletion: #ae3731;
+  --syntax-deletion-background: #fbeceb;
+  --subtitle-section: #7750a8;
+  --subtitle-time: #2869b7;
+  --subtitle-tag: #277a49;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text-shell: #17191c;
+    --text-page: #1c1e22;
+    --text-foreground: #d7d9de;
+    --text-heading: #eef0f3;
+    --text-muted: #a3a8b1;
+    --text-subtle: #777e88;
+    --text-border: #30343a;
+    --text-soft: #25282d;
+    --text-soft-hover: #22252a;
+    --text-gutter: #191b1f;
+    --text-gutter-number: #666d77;
+    --text-link: #82b2e8;
+    --text-quote-border: #505761;
+    --text-notice-border: #514a31;
+    --text-notice-foreground: #d8c78e;
+    --text-notice-background: #2d2a20;
+    --syntax-comment: #7f8792;
+    --syntax-keyword: #c69acb;
+    --syntax-string: #93bd8e;
+    --syntax-number: #84abd3;
+    --syntax-title: #cfb777;
+    --syntax-built-in: #80bdc4;
+    --syntax-foreground: #d7d9de;
+    --syntax-addition: #9bc89f;
+    --syntax-addition-background: #233529;
+    --syntax-deletion: #dc9894;
+    --syntax-deletion-background: #3b2627;
+    --subtitle-section: #bea0dd;
+    --subtitle-time: #82b2e8;
+    --subtitle-tag: #93bd8e;
+  }
 }
 
 * {
@@ -774,7 +840,8 @@ kbd {
   min-width: 100%;
   min-height: 100vh;
   overflow: visible;
-  background: #f3f5f7;
+  color: var(--text-foreground);
+  background: var(--text-shell);
 }
 
 .document-viewport.is-epub { padding: 0; background: #faf8f2; }
@@ -839,9 +906,9 @@ kbd {
   z-index: 2;
   left: 0;
   padding: 7px 14px;
-  border-bottom: 1px solid #ead89e;
-  color: #745c13;
-  background: #fff9df;
+  border-bottom: 1px solid var(--text-notice-border);
+  color: var(--text-notice-foreground);
+  background: var(--text-notice-background);
   font-size: 12px;
   user-select: none;
 }
@@ -850,8 +917,8 @@ kbd {
   min-height: 100vh;
   margin: 0;
   padding: 28px 34px 44px;
-  color: #252a31;
-  background: #fff;
+  color: var(--text-foreground);
+  background: var(--text-page);
   font: 14.5px/1.72 "Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace;
   tab-size: 4;
   white-space: pre-wrap;
@@ -863,34 +930,68 @@ kbd {
 }
 
 .text-viewer.is-subtitle pre {
-  color: #303640;
-  background: #fff;
+  color: var(--text-foreground);
+  background: var(--text-page);
   font-size: 15px;
   line-height: 1.85;
 }
 
 .subtitle-index {
-  color: #8b949e;
+  color: var(--text-subtle);
   font-weight: 650;
 }
 
 .subtitle-section,
 .subtitle-label {
-  color: #8250df;
+  color: var(--subtitle-section);
   font-weight: 650;
 }
 
 .subtitle-time {
-  color: #0969da;
+  color: var(--subtitle-time);
   font-variant-numeric: tabular-nums;
 }
 
 .subtitle-arrow {
-  color: #8b949e;
+  color: var(--text-subtle);
 }
 
 .subtitle-tag {
-  color: #1a7f37;
+  color: var(--subtitle-tag);
+}
+
+.code-frame {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100vh;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: stretch;
+  background: var(--text-page);
+}
+
+.text-viewer .code-line-numbers,
+.text-viewer .code-content {
+  min-height: 100vh;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.text-viewer .code-line-numbers {
+  position: sticky;
+  z-index: 1;
+  left: 0;
+  padding: 28px 13px 44px 18px;
+  border-right: 1px solid var(--text-border);
+  color: var(--text-gutter-number);
+  background: var(--text-gutter);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.text-viewer .code-content {
+  padding: 28px 34px 44px 20px;
 }
 
 .text-viewer.is-plain pre {
@@ -907,8 +1008,8 @@ kbd {
   min-height: 100vh;
   margin: 0;
   padding: 36px 38px 62px;
-  color: #24292f;
-  background: #fff;
+  color: var(--text-foreground);
+  background: var(--text-page);
   font-size: 16px;
   line-height: 1.75;
   overflow-wrap: anywhere;
@@ -921,7 +1022,7 @@ kbd {
 .markdown-body h5,
 .markdown-body h6 {
   margin: 1.35em 0 0.55em;
-  color: #17202b;
+  color: var(--text-heading);
   line-height: 1.28;
   letter-spacing: -0.015em;
 }
@@ -934,13 +1035,13 @@ kbd {
 
 .markdown-body h1 {
   padding-bottom: 0.28em;
-  border-bottom: 1px solid #e4e8ed;
+  border-bottom: 1px solid var(--text-border);
   font-size: 2em;
 }
 
 .markdown-body h2 {
   padding-bottom: 0.24em;
-  border-bottom: 1px solid #e7eaee;
+  border-bottom: 1px solid var(--text-border);
   font-size: 1.5em;
 }
 
@@ -979,9 +1080,9 @@ kbd {
 
 .markdown-body blockquote {
   padding: 0.15em 1em;
-  border-left: 4px solid #cbd3dc;
-  color: #5d6672;
-  background: #f7f9fb;
+  border-left: 4px solid var(--text-quote-border);
+  color: var(--text-muted);
+  background: var(--text-soft-hover);
 }
 
 .markdown-body blockquote > :last-child {
@@ -992,11 +1093,11 @@ kbd {
   height: 1px;
   margin: 1.8em 0;
   border: 0;
-  background: #dfe4e9;
+  background: var(--text-border);
 }
 
 .markdown-body a {
-  color: #0969da;
+  color: var(--text-link);
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
 }
@@ -1004,7 +1105,7 @@ kbd {
 .markdown-body code {
   padding: 0.15em 0.36em;
   border-radius: 4px;
-  background: #eff2f5;
+  background: var(--text-soft);
   font: 0.88em/1.5 "Cascadia Mono", "Cascadia Code", Consolas, monospace;
 }
 
@@ -1013,9 +1114,9 @@ kbd {
   overflow: auto;
   margin: 0 0 1em;
   padding: 15px 18px;
-  border: 1px solid #e1e5ea;
+  border: 1px solid var(--text-border);
   border-radius: 7px;
-  background: #f6f8fa;
+  background: var(--text-soft-hover);
   font-size: 13.5px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -1030,14 +1131,14 @@ kbd {
 .markdown-table-scroll {
   width: 100%;
   overflow-x: auto;
-  border: 1px solid #d8dee5;
+  border: 1px solid var(--text-border);
   border-radius: 7px;
 }
 
 .markdown-body table {
   width: 100%;
   border-collapse: collapse;
-  background: #fff;
+  background: var(--text-page);
   font-size: 14px;
 }
 
@@ -1045,8 +1146,8 @@ kbd {
 .markdown-body td {
   min-width: 80px;
   padding: 9px 12px;
-  border-right: 1px solid #e1e5e9;
-  border-bottom: 1px solid #e1e5e9;
+  border-right: 1px solid var(--text-border);
+  border-bottom: 1px solid var(--text-border);
   text-align: left;
   vertical-align: top;
 }
@@ -1061,13 +1162,13 @@ kbd {
 }
 
 .markdown-body th {
-  color: #303843;
-  background: #f4f6f8;
+  color: var(--text-heading);
+  background: var(--text-soft);
   font-weight: 650;
 }
 
 .markdown-body tbody tr:nth-child(even) {
-  background: #fafbfc;
+  background: var(--text-soft-hover);
 }
 
 .document-host.is-archive {
@@ -1256,11 +1357,21 @@ button[aria-expanded="false"] .zip-viewer-toggle::before {
     padding-right: 24px;
     padding-left: 24px;
   }
+
+  .text-viewer .code-line-numbers {
+    padding-right: 10px;
+    padding-left: 12px;
+  }
+
+  .text-viewer .code-content {
+    padding-right: 24px;
+    padding-left: 16px;
+  }
 }
 
 .hljs-comment,
 .hljs-quote {
-  color: #6a737d;
+  color: var(--syntax-comment);
   font-style: italic;
 }
 
@@ -1268,7 +1379,7 @@ button[aria-expanded="false"] .zip-viewer-toggle::before {
 .hljs-selector-tag,
 .hljs-literal,
 .hljs-type {
-  color: #9b2393;
+  color: var(--syntax-keyword);
 }
 
 .hljs-string,
@@ -1276,7 +1387,7 @@ button[aria-expanded="false"] .zip-viewer-toggle::before {
 .hljs-attribute,
 .hljs-template-tag,
 .hljs-template-variable {
-  color: #0a7b3e;
+  color: var(--syntax-string);
 }
 
 .hljs-number,
@@ -1285,7 +1396,7 @@ button[aria-expanded="false"] .zip-viewer-toggle::before {
 .hljs-variable,
 .hljs-selector-attr,
 .hljs-selector-pseudo {
-  color: #005cc5;
+  color: var(--syntax-number);
 }
 
 .hljs-title,
@@ -1294,29 +1405,29 @@ button[aria-expanded="false"] .zip-viewer-toggle::before {
 .hljs-section,
 .hljs-selector-id,
 .hljs-selector-class {
-  color: #795e26;
+  color: var(--syntax-title);
 }
 
 .hljs-built_in,
 .hljs-name,
 .hljs-meta {
-  color: #006d8f;
+  color: var(--syntax-built-in);
 }
 
 .hljs-params,
 .hljs-property,
 .hljs-tag {
-  color: #24292f;
+  color: var(--syntax-foreground);
 }
 
 .hljs-addition {
-  color: #176f2c;
-  background: #e6ffec;
+  color: var(--syntax-addition);
+  background: var(--syntax-addition-background);
 }
 
 .hljs-deletion {
-  color: #b42318;
-  background: #ffebe9;
+  color: var(--syntax-deletion);
+  background: var(--syntax-deletion-background);
 }
 
 ::highlight(docx-search-results) {

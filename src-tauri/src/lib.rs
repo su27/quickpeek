@@ -311,8 +311,11 @@ fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    #[cfg(target_os = "windows")]
+    windows_pdf_renderer::release_idle();
     Some(PreviewRequest {
-        generation: PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1,
+        generation,
         is_directory: metadata.is_dir(),
         modified_at,
         path: path.to_string_lossy().into_owned(),
@@ -331,7 +334,11 @@ fn get_initial_preview(app: AppHandle) -> Option<PreviewRequest> {
     windows_preview::set_preview_target(&app, &path);
     let preview = preview_request(path)?;
     #[cfg(target_os = "windows")]
-    windows_loading::begin(&app, preview.generation, preview_name(&preview.path));
+    {
+        let name = preview_name(&preview.path);
+        windows_preview::set_window_title(&app, &format!("{name} · Loading"));
+        windows_loading::begin(&app, preview.generation, name);
+    }
     Some(preview)
 }
 
@@ -344,27 +351,36 @@ fn preview_name(path: &str) -> String {
 }
 
 #[tauri::command]
-async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String> {
+async fn read_preview_file(
+    path: String,
+    generation: Option<u32>,
+) -> Result<tauri::ipc::Response, String> {
     let path = validated_file_path(&path)?;
     if is_stream_path(&path) {
         return Err("This format requires a streaming file URL".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
+        if generation.is_some_and(|g| !preview_generation_is_current(g)) {
+            return Err("Preview cancelled".into());
+        }
         let file = std::fs::File::open(&path)
             .map_err(|error| format!("Could not read {}: {error}", path.to_string_lossy()))?;
         let is_epub = path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
         const MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
-        if is_epub && file.metadata().map_err(|e| e.to_string())?.len() > MAX_EPUB_BYTES {
-            return Err("EPUB exceeds the 64 MB preview limit".into());
+        let max_bytes = if is_epub {
+            MAX_EPUB_BYTES
+        } else {
+            32 * 1024 * 1024
+        };
+        if !is_text_path(&path) && file.metadata().map_err(|e| e.to_string())?.len() > max_bytes {
+            return Err("File exceeds the preview limit".into());
         }
         let limit = if is_text_path(&path) {
             MAX_TEXT_PREVIEW_BYTES
-        } else if is_epub {
-            MAX_EPUB_BYTES + 1
         } else {
-            u64::MAX
+            max_bytes + 1
         };
         let expected_size = file
             .metadata()
@@ -374,8 +390,11 @@ async fn read_preview_file(path: String) -> Result<tauri::ipc::Response, String>
         file.take(limit)
             .read_to_end(&mut bytes)
             .map_err(|error| format!("Could not read {}: {error}", path.to_string_lossy()))?;
-        if is_epub && bytes.len() as u64 > MAX_EPUB_BYTES {
-            return Err("EPUB exceeds the preview limit".into());
+        if !is_text_path(&path) && bytes.len() as u64 > max_bytes {
+            return Err("File exceeds the preview limit".into());
+        }
+        if generation.is_some_and(|g| !preview_generation_is_current(g)) {
+            return Err("Preview cancelled".into());
         }
         Ok(tauri::ipc::Response::new(bytes))
     })
@@ -403,7 +422,7 @@ async fn read_pdf_dimensions(path: String) -> Result<Option<PreviewDimensions>, 
 }
 
 #[tauri::command]
-async fn read_pdf_info(path: String) -> Result<PdfDocumentInfo, String> {
+async fn read_pdf_info(path: String, generation: Option<u32>) -> Result<PdfDocumentInfo, String> {
     let path = validated_file_path(&path)?;
     if !path
         .extension()
@@ -415,7 +434,7 @@ async fn read_pdf_info(path: String) -> Result<PdfDocumentInfo, String> {
     #[cfg(target_os = "windows")]
     {
         tauri::async_runtime::spawn_blocking(move || {
-            windows_pdf_renderer::page_sizes(&path).map(|pages| PdfDocumentInfo {
+            windows_pdf_renderer::page_sizes(&path, generation).map(|pages| PdfDocumentInfo {
                 pages: pages
                     .into_iter()
                     .map(|(width, height)| PreviewDimensions { width, height })
@@ -437,6 +456,7 @@ async fn render_pdf_page(
     path: String,
     page_index: u32,
     target_width: u32,
+    generation: Option<u32>,
 ) -> Result<tauri::ipc::Response, String> {
     let path = validated_file_path(&path)?;
     if !path
@@ -449,7 +469,7 @@ async fn render_pdf_page(
     #[cfg(target_os = "windows")]
     {
         tauri::async_runtime::spawn_blocking(move || {
-            windows_pdf_renderer::render_page(&path, page_index, target_width)
+            windows_pdf_renderer::render_page(&path, page_index, target_width, generation)
                 .map(tauri::ipc::Response::new)
         })
         .await
@@ -649,11 +669,20 @@ fn unload_system_preview(generation: u32) -> Result<(), String> {
 pub(crate) fn hide_preview(app: &AppHandle) {
     let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     #[cfg(target_os = "windows")]
+    windows_pdf_renderer::release_idle();
+    #[cfg(target_os = "windows")]
     windows_memory::begin_cleanup();
     #[cfg(target_os = "windows")]
     windows_loading::cancel(app);
     #[cfg(target_os = "windows")]
-    windows_preview::hide_window(app);
+    {
+        let ui_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if preview_generation_is_current(generation) {
+                windows_preview::hide_window(&ui_app);
+            }
+        });
+    }
     #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -682,9 +711,12 @@ pub(crate) fn open_preview_path(app: &AppHandle, path: PathBuf) {
     windows_preview::prepare_for_use(app);
     if let Some(preview) = preview_request(path) {
         #[cfg(target_os = "windows")]
-        windows_loading::begin(app, preview.generation, preview_name(&preview.path));
-        #[cfg(target_os = "windows")]
-        windows_preview::set_preview_target(app, Path::new(&preview.path));
+        {
+            windows_preview::set_preview_target(app, Path::new(&preview.path));
+            let name = preview_name(&preview.path);
+            windows_preview::set_window_title(app, &format!("{name} · Loading"));
+            windows_loading::begin(app, preview.generation, name);
+        }
         let _ = app.emit_to("main", "preview-file", preview);
     }
 }
@@ -706,22 +738,52 @@ fn show_preview_window(
             if generation.is_some_and(|g| !preview_generation_is_current(g)) {
                 return;
             }
-            if let (Some(window), Some(title)) = (ui_app.get_webview_window("main"), title) {
-                let _ = window.set_title(&title);
+            if let Some(title) = title {
+                windows_preview::set_window_title(&ui_app, &title);
             }
             // The engine was resumed before dispatching this preview. Resuming
             // again here queues WebView visibility work after native activation,
             // which can cover the ready Rich Edit / system preview child.
             windows_preview::show_without_activation(&ui_app);
             windows_memory::present(&ui_app, generation, native_preview.unwrap_or(false));
-            if let Some(generation) = generation {
-                windows_loading::finish(generation);
-            }
         });
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+    }
+}
+
+#[tauri::command]
+fn prepare_browser_preview(app: AppHandle) -> u32 {
+    let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    #[cfg(target_os = "windows")]
+    {
+        windows_loading::cancel(&app);
+        windows_preview::clear_preview_target(&app);
+        windows_preview::prepare_for_use(&app);
+    }
+    generation
+}
+
+#[tauri::command]
+fn set_preview_window_title(app: AppHandle, title: String, generation: Option<u32>) {
+    if generation.is_some_and(|g| !preview_generation_is_current(g)) {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    windows_preview::set_window_title(&app, &title);
+    #[cfg(not(target_os = "windows"))]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(&title);
+    }
+}
+
+#[tauri::command]
+fn finish_preview_loading(app: AppHandle, generation: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app.run_on_main_thread(move || windows_loading::finish(generation));
     }
 }
 
@@ -780,6 +842,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    if windows_preview_handler::run_helper_if_requested() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             diagnostic_log(&format!("single-instance args: {args:?}"));
@@ -835,9 +901,12 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             unload_system_preview,
             show_preview_window,
+            set_preview_window_title,
+            finish_preview_loading,
             hide_preview_window,
             preview_cleanup_complete,
             prepare_preview_engine,
+            prepare_browser_preview,
             log_frontend_error
         ])
         .run(tauri::generate_context!())

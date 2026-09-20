@@ -181,10 +181,27 @@ fn decode_zip_name(bytes: &[u8], utf8: bool, extra: &[u8]) -> String {
         return String::from_utf8_lossy(bytes).into_owned();
     }
     #[cfg(windows)]
-    if let Some(name) = decode_code_page(bytes, 437) {
+    if let Some(name) =
+        decode_legacy_zip_name(bytes, unsafe { windows::Win32::Globalization::GetACP() })
+    {
         return name;
     }
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(windows)]
+fn decode_legacy_zip_name(bytes: &[u8], local_code_page: u32) -> Option<String> {
+    // Older East Asian Windows archivers wrote local multibyte filenames
+    // without Unicode metadata. Prefer the local DBCS encoding only when the
+    // entire name is valid; otherwise retain ZIP's historical CP437 fallback.
+    // Single-byte ANSI pages are deliberately excluded: they accept almost
+    // everything and would incorrectly reinterpret ordinary OEM filenames.
+    if matches!(local_code_page, 932 | 936 | 949 | 950) {
+        if let Some(name) = decode_code_page(bytes, local_code_page) {
+            return Some(name);
+        }
+    }
+    decode_code_page(bytes, 437)
 }
 
 #[cfg(windows)]
@@ -433,11 +450,36 @@ mod tests {
             decode_code_page(b"caf\x82.txt", 437).as_deref(),
             Some("café.txt")
         );
+        assert_eq!(
+            decode_legacy_zip_name(b"\xd6\xd0\xce\xc4.txt", 936).as_deref(),
+            Some("中文.txt")
+        );
+        assert_eq!(
+            decode_legacy_zip_name(b"caf\x82.txt", 936).as_deref(),
+            Some("café.txt")
+        );
+        assert_eq!(
+            decode_legacy_zip_name(b"caf\x82.txt", 1252).as_deref(),
+            Some("café.txt")
+        );
     }
     #[cfg(windows)]
     #[test]
     fn optional_real_archive_encoding_regressions() {
         // Private samples remain outside the repository; opt in when available.
+        if let Some(path) = std::env::var_os("QUICKPEEK_TEST_GBK_ZIP") {
+            let result = zip_directory(&mut File::open(path).unwrap(), || true).unwrap();
+            assert_eq!(result.entries.len(), 2165);
+            assert!(!result.truncated);
+            assert!(result
+                .entries
+                .iter()
+                .all(|entry| entry.name.starts_with("科幻世界10年精华本/")));
+            assert!(result
+                .entries
+                .iter()
+                .any(|entry| entry.name == "科幻世界10年精华本/1991/目录.txt"));
+        }
         if let Some(path) = std::env::var_os("QUICKPEEK_TEST_UNICODE_ZIP") {
             let result = zip_directory(&mut File::open(path).unwrap(), || true).unwrap();
             assert_eq!(result.entries.len(), 9);

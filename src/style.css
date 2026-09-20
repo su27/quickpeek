@@ -860,10 +860,14 @@ kbd {
 }
 .epub-toolbar button:hover, .epub-toolbar summary:hover { color: #383e34; background: #eeece3; }
 .epub-toolbar button:disabled { opacity: .3; cursor: default; }
+.epub-toolbar .epub-navigation, .epub-menu summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; flex-shrink: 0;
+}
 .epub-position { flex: 1; padding-left: 8px; font-variant-numeric: tabular-nums; }
 .epub-menu { position: relative; }
 .epub-menu summary { list-style: none; }
-.epub-menu summary::before { content: "☰"; margin-right: 8px; font-size: 13px; }
+.epub-menu summary::-webkit-details-marker { display: none; }
 .epub-menu nav {
   position: absolute; top: calc(100% + 10px); left: 0;
   width: min(360px, 76vw); max-height: 65vh; overflow: auto;

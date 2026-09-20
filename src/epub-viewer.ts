@@ -106,12 +106,25 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
   const frame = document.createElement("section"); frame.className = "epub-viewer";
   const toolbar = document.createElement("div"); toolbar.className = "epub-toolbar";
   const menu = document.createElement("details"); menu.className = "epub-menu";
-  const toggle = document.createElement("summary"); toggle.textContent = "Contents";
+  const toggle = document.createElement("summary");
+  toggle.title = "Table of contents";
+  toggle.setAttribute("aria-label", "Table of contents");
+  toggle.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>';
   const list = document.createElement("nav"); list.setAttribute("aria-label", "Table of contents");
   menu.append(toggle, list);
   const position = document.createElement("span"); position.className = "epub-position";
-  const previous = document.createElement("button"); previous.textContent = "Previous chapter";
-  const next = document.createElement("button"); next.textContent = "Next chapter";
+  const previous = document.createElement("button");
+  const next = document.createElement("button");
+  for (const [button, label, path] of [
+    [previous, "Previous chapter", "m14 6-6 6 6 6"],
+    [next, "Next chapter", "m10 6 6 6-6 6"],
+  ] as const) {
+    button.type = "button";
+    button.className = "epub-navigation";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${path}"/></svg>`;
+  }
   toolbar.append(menu, position, previous, next);
   const heading = document.createElement("header"); heading.className = "epub-book-heading";
   const kicker = document.createElement("span"); kicker.textContent = "Ebook";
@@ -128,10 +141,12 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
   const buttons: HTMLButtonElement[] = [];
   const update = (): void => {
     heading.hidden = page > 0;
-    position.textContent = `${page + 1} / ${count} chapters`;
+    position.textContent = `${page + 1} / ${count}`;
+    position.title = `Chapter ${page + 1} of ${count}`;
+    position.setAttribute("aria-label", position.title);
     previous.disabled = page === 0; next.disabled = page + 1 >= count;
     for (const [index, button] of buttons.entries()) button.setAttribute("aria-current", index === page ? "true" : "false");
-    if (context.isActive()) context.setPageLabel(`${page + 1}/${count} chapters`);
+    if (context.isActive()) context.setPageLabel(`${page + 1}/${count}`);
   };
   const jump = (fragment: string): void => {
     if (fragment) current?.anchors.get(fragment)?.scrollIntoView({ block: "start" });
@@ -182,5 +197,5 @@ export async function renderEpubViewer(bytes: ArrayBuffer, context: RenderContex
     signal.throwIfAborted(); await show(0); signal.throwIfAborted();
     host.classList.add("is-epub"); host.append(frame);
   } catch (error) { destroy(); throw error; }
-  return { get label() { return `${page + 1}/${count} chapters`; }, destroy };
+  return { get label() { return `${page + 1}/${count}`; }, destroy };
 }

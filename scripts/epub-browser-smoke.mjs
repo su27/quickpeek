@@ -44,11 +44,11 @@ window.result=(async()=>{
  refused=false;try{await renderEpubViewer(await (await fetch('/drm')).arrayBuffer(),context())}catch(e){refused=e.message.includes('DRM')}assert(refused&&host.childElementCount===0,'encrypted content not rejected cleanly');
  for(const kind of ['epub3','epub2']){
    const viewer=await renderEpubViewer(await (await fetch('/'+kind)).arrayBuffer(),context());
-   assert(viewer.label==='1/3 chapters','spine order');assert(host.querySelector('nav button').textContent.includes('慢下'),'TOC titles');
+   assert(viewer.label==='1/3','spine order');assert(host.querySelector('nav button').textContent.includes('慢下'),'TOC titles');
    assert(!window.evil&&!host.querySelector('script,iframe,style,link,[onload]'),'unsafe DOM retained');
    assert(!host.querySelector('img[src^="http"]'),'remote image retained');assert(host.querySelector('table'),'table missing');
-   const internal=host.querySelector('a[data-book-path="OPS/text/two.xhtml"]');internal.click();await wait(()=>viewer.label==='2/3 chapters');
-   const choices=host.querySelectorAll('nav button');choices[2].click();choices[0].click();await wait(()=>viewer.label==='1/3 chapters');
+   const internal=host.querySelector('a[data-book-path="OPS/text/two.xhtml"]');internal.click();await wait(()=>viewer.label==='2/3');
+   const choices=host.querySelectorAll('nav button');choices[2].click();choices[0].click();await wait(()=>viewer.label==='1/3');
    viewer.destroy();assert(activeUrls.size===0&&host.childElementCount===0,'book resources leaked');
  }
  let realChapters=null;

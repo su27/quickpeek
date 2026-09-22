@@ -82,7 +82,7 @@ try {
   assert.ok(await evaluate("document.querySelectorAll('#documentHost section.docx').length > 0"), "Office worker did not render inside WebView2");
   if (process.env.QUICKPEEK_PDF_FIXTURE) {
     await open(resolve(process.env.QUICKPEEK_PDF_FIXTURE), "pdf", "visible");
-    assert.ok(await evaluate("document.querySelector('.pdf-native-page.is-ready img')?.naturalWidth > 64"));
+    assert.ok(await evaluate("document.querySelector('.pdf-page.is-ready canvas')?.width > 64"));
   }
   if (process.env.QUICKPEEK_DOC_FIXTURE) await open(resolve(process.env.QUICKPEEK_DOC_FIXTURE), "system", "hidden");
   await open(text, "text", "visible");

@@ -227,14 +227,22 @@ async function resizeWindowForPreview(
     } else if (kind === "pdf" && dimensions) {
       const ratio = dimensions.width / dimensions.height;
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
-      height = width / ratio;
+      height = (width - 120) / ratio + 40;
       if (height > maximumHeight) {
         height = maximumHeight;
-        width = height * ratio;
+        width = (height - 40) * ratio + 120;
       }
     } else if (kind === "pdf") {
       width = clamp(workArea.width * 0.72, Math.min(720, maximumWidth), maximumWidth);
       height = maximumHeight;
+    } else if (kind === "docx" && dimensions && dimensions.width > dimensions.height) {
+      const padding = getComputedStyle(documentHost);
+      // The page already includes its Word margins. Add the preview's outside
+      // spacing and room for the system scrollbar without stretching the page.
+      width = Math.min(maximumWidth, Math.ceil(dimensions.width +
+        parseFloat(padding.paddingLeft) + parseFloat(padding.paddingRight) + 24));
+      height = Math.min(maximumHeight, Math.ceil(dimensions.height +
+        parseFloat(padding.paddingTop) + parseFloat(padding.paddingBottom)));
     } else if (kind === "docx" || kind === "system" || kind === "text" || kind === "font" || kind === "epub") {
       width = clamp(READING_PREVIEW_WIDTH, Math.min(460, maximumWidth), maximumWidth);
       height = maximumHeight;
@@ -717,19 +725,13 @@ async function renderDocumentFromPath(
         return metadataSource();
       }
       if (format.loadMode === "url") {
-        const [, pdfInfo] = await Promise.all([
+        const [, previewDimensions] = await Promise.all([
           invoke("allow_preview_asset", { path }),
           format.kind === "pdf"
-            ? invoke<{ pages: Array<{ height: number; width: number }> }>("read_pdf_info", { path, generation })
+            ? invoke<{ height: number; width: number } | null>("read_pdf_dimensions", { path })
                 .catch(() => null)
             : Promise.resolve(null),
         ]);
-        const previewDimensions = pdfInfo?.pages[0] ?? (
-          format.kind === "pdf"
-            ? await invoke<{ height: number; width: number } | null>("read_pdf_dimensions", { path })
-                .catch(() => null)
-            : undefined
-        );
         return {
           type: "url" as const,
           isDirectory,
@@ -738,7 +740,6 @@ async function renderDocumentFromPath(
           modifiedAt,
           name,
           path,
-          pdfPages: pdfInfo?.pages,
           systemGeneration: generation,
           previewDimensions,
           size: sourceSize,

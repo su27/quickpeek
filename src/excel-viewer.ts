@@ -77,6 +77,19 @@ type ExcelViewerOptions = {
 
 function cellText(value: unknown): string {
   if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    const candidate = value as Record<string, unknown>;
+    if (Array.isArray(candidate.richText)) {
+      return candidate.richText.map(part => cellText(
+        typeof part === "object" && part !== null
+          ? (part as Record<string, unknown>).text
+          : part,
+      )).join("");
+    }
+    if ("text" in candidate) return cellText(candidate.text);
+    if ("value" in candidate) return cellText(candidate.value);
+    if ("result" in candidate) return cellText(candidate.result);
+  }
   return String(value);
 }
 
@@ -90,6 +103,10 @@ function normalizeSheetDimensions(sheets: PreviewSheet[]): PreviewSheet[] {
       if (rowKey === "len" || typeof rowValue !== "object" || !rowValue?.cells) continue;
       if (Number(rowKey) >= 100000 || (cells += Object.keys(rowValue.cells).length) > 200000) throw new Error("Workbook exceeds the preview complexity limit");
       for (const columnKey of Object.keys(rowValue.cells)) {
+        const cell = rowValue.cells[columnKey];
+        if (cell && typeof cell.text !== "string" && typeof cell.text !== "number") {
+          cell.text = cellText(cell.text);
+        }
         const column = Number(columnKey);
         if (column >= 512) throw new Error("Worksheet exceeds the preview dimensions limit");
         if (Number.isInteger(column) && column >= 0) {

@@ -20,9 +20,7 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
 windows-core = "0.61.2"
-windows-future = "0.2.1"
 windows = { version = "0.61.3", features = [
-  "Data_Pdf",
   "Foundation",
   "Graphics_Imaging",
   "Storage",

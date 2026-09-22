@@ -4,6 +4,19 @@ import {
   type Options,
   type WordDocument,
 } from "docx-preview";
+import type { PreviewDimensions } from "./document-formats";
+
+function pageDimensions(host: HTMLElement): PreviewDimensions | null {
+  // Inline page geometry remains available while the native window or staging
+  // host is hidden, unlike getBoundingClientRect(). docx-preview emits points.
+  const page = host.querySelector<HTMLElement>("section.docx");
+  const pixels = (length = "") => {
+    const match = /^([\d.]+)(pt|px)$/.exec(length);
+    return match ? Number(match[1]) * (match[2] === "pt" ? 4 / 3 : 1) : 0;
+  };
+  const width = pixels(page?.style.width), height = pixels(page?.style.minHeight);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
 
 type DocumentNode = {
   type?: string;
@@ -71,7 +84,7 @@ export async function renderDocx(
   styleContainer: HTMLElement = bodyContainer,
   options?: Partial<Options>,
   signal?: AbortSignal,
-): Promise<WordDocument & { destroy(): void }> {
+): Promise<WordDocument & { previewDimensions: PreviewDimensions | null; destroy(): void }> {
   signal?.throwIfAborted();
   const document = await parseAsync(data, options);
   signal?.throwIfAborted();
@@ -112,7 +125,7 @@ export async function renderDocx(
       console.info(`Normalized horizontal text direction in ${correctedCells} table cells.`);
     }
 
-    return Object.assign(document, { destroy });
+    return Object.assign(document, { previewDimensions: pageDimensions(bodyContainer), destroy });
   } catch (error) {
     destroy();
     throw error;

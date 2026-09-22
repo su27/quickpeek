@@ -22,8 +22,6 @@ mod windows_loading;
 #[cfg(target_os = "windows")]
 mod windows_memory;
 #[cfg(target_os = "windows")]
-mod windows_pdf_renderer;
-#[cfg(target_os = "windows")]
 mod windows_preview;
 #[cfg(target_os = "windows")]
 mod windows_preview_handler;
@@ -215,11 +213,6 @@ struct PreviewDimensions {
     width: f64,
 }
 
-#[derive(Clone, Serialize)]
-struct PdfDocumentInfo {
-    pages: Vec<PreviewDimensions>,
-}
-
 fn diagnostic_log(message: &str) {
     eprintln!("[QuickPeek] {message}");
     if std::env::var_os("QUICKPEEK_DIAGNOSTICS").is_none() {
@@ -312,8 +305,6 @@ fn preview_request(path: PathBuf) -> Option<PreviewRequest> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
     let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    #[cfg(target_os = "windows")]
-    windows_pdf_renderer::release_idle();
     Some(PreviewRequest {
         generation,
         is_directory: metadata.is_dir(),
@@ -419,67 +410,6 @@ async fn read_pdf_dimensions(path: String) -> Result<Option<PreviewDimensions>, 
     })
     .await
     .map_err(|error| format!("Could not read PDF dimensions: {error}"))?
-}
-
-#[tauri::command]
-async fn read_pdf_info(path: String, generation: Option<u32>) -> Result<PdfDocumentInfo, String> {
-    let path = validated_file_path(&path)?;
-    if !path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-    {
-        return Err("File is not a PDF".to_string());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            windows_pdf_renderer::page_sizes(&path, generation).map(|pages| PdfDocumentInfo {
-                pages: pages
-                    .into_iter()
-                    .map(|(width, height)| PreviewDimensions { width, height })
-                    .collect(),
-            })
-        })
-        .await
-        .map_err(|error| format!("Could not read PDF information: {error}"))?
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        Err("PDF preview is not supported on this system".to_string())
-    }
-}
-
-#[tauri::command]
-async fn render_pdf_page(
-    path: String,
-    page_index: u32,
-    target_width: u32,
-    generation: Option<u32>,
-) -> Result<tauri::ipc::Response, String> {
-    let path = validated_file_path(&path)?;
-    if !path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-    {
-        return Err("File is not a PDF".to_string());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            windows_pdf_renderer::render_page(&path, page_index, target_width, generation)
-                .map(tauri::ipc::Response::new)
-        })
-        .await
-        .map_err(|error| format!("PDF page rendering failed: {error}"))?
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (path, page_index, target_width);
-        Err("PDF preview is not supported on this system".to_string())
-    }
 }
 
 #[tauri::command]
@@ -668,8 +598,6 @@ fn unload_system_preview(generation: u32) -> Result<(), String> {
 
 pub(crate) fn hide_preview(app: &AppHandle) {
     let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    #[cfg(target_os = "windows")]
-    windows_pdf_renderer::release_idle();
     #[cfg(target_os = "windows")]
     windows_memory::begin_cleanup();
     #[cfg(target_os = "windows")]
@@ -884,8 +812,6 @@ pub fn run() {
             get_initial_preview,
             read_preview_file,
             read_pdf_dimensions,
-            read_pdf_info,
-            render_pdf_page,
             decode_system_image,
             read_tiff_info,
             render_tiff_page,

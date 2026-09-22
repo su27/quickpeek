@@ -34,7 +34,6 @@ type PreviewMetadata = {
   name: string;
   path?: string;
   systemGeneration?: number;
-  pdfPages?: PreviewDimensions[];
   previewDimensions?: PreviewDimensions | null;
   shellIcon?: ShellIcon;
   loadShellIcon?: () => Promise<ShellIcon | undefined>;
@@ -229,7 +228,7 @@ const formats: readonly DocumentFormat[] = [
         experimental: true,
         debug: false,
       }, signal);
-      return noController({}, viewer.destroy);
+      return noController({ previewDimensions: viewer.previewDimensions }, viewer.destroy);
     },
   },
   {
@@ -307,21 +306,17 @@ const formats: readonly DocumentFormat[] = [
       const { renderPdfViewer } = await import("./pdf-viewer");
       const viewer = await renderPdfViewer(
         requireUrl(source),
-        source.path,
-        source.pdfPages,
-        source.previewDimensions ?? null,
         previewWidth,
         host,
         (page, count) => {
           if (isActive()) setPageLabel(`${page}/${count}`);
         },
         signal,
-        source.systemGeneration,
       );
-      return noController(
+      return { ...noController(
         { fixedPageLabel: viewer.pageCount > 0 ? `1/${viewer.pageCount}` : "", previewDimensions: viewer.dimensions },
         viewer.destroy,
-      );
+      ), start: viewer.start };
     },
   },
   {

@@ -12,6 +12,19 @@ const marginCases = [['zero', 32, 2], ['missing', 32, 2], ['normal', 96, 2]];
 const workbook = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Name', 'Count'], ['Sample', 42]]), 'Sheet');
 for (const type of ['xlsx', 'xls', 'csv']) marginFixtures.set(`/fixture-sheet.${type}`, XLSX.write(workbook, { type: 'buffer', bookType: type }));
+// Valid OPC absolute table targets and prefixed SpreadsheetML, as emitted by
+// some workbook generators. Keep the fixture synthetic and independent of user files.
+const prefixedBook = await JSZip.loadAsync(marginFixtures.get('/fixture-sheet.xlsx'));
+prefixedBook.file('xl/worksheets/sheet1.xml', (await prefixedBook.file('xl/worksheets/sheet1.xml').async('string')).replace('</worksheet>', '<tableParts count="1"><tablePart r:id="table1"/></tableParts></worksheet>'));
+prefixedBook.file('xl/worksheets/_rels/sheet1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="table1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>');
+prefixedBook.file('xl/tables/table1.xml', '<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:B2" totalsRowShown="0"><autoFilter ref="A1:B2"/><tableColumns count="2"><tableColumn id="1" name="Name"/><tableColumn id="2" name="Count"/></tableColumns><tableStyleInfo name="TableStyleMedium2" showRowStripes="1"/></table>');
+for (const entry of Object.values(prefixedBook.files)) {
+  if (!entry.name.startsWith('xl/') || !entry.name.endsWith('.xml')) continue;
+  const xml = await entry.async('string');
+  if (!xml.includes('xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"')) continue;
+  prefixedBook.file(entry.name, xml.replace(/<(\/?)([A-Za-z][\w.-]*)(?=[\s/>])/g, '<$1p:$2').replace('xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"', 'xmlns:p="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'));
+}
+marginFixtures.set('/fixture-sheet.prefixed.xlsx', await prefixedBook.generateAsync({type:'nodebuffer'}));
 for (const [name, margin] of [['zero', '0'], ['normal', '1440'], ['missing', null]]) {
   const zip = await JSZip.loadAsync(readFileSync(new URL('../fixtures/documents/sample.docx', import.meta.url)));
   const xml = await zip.file('word/document.xml').async('string');
@@ -30,6 +43,10 @@ if (process.env.QUICKPEEK_DOCX_FIXTURE) {
   marginFixtures.set('/fixture-real.docx', readFileSync(process.env.QUICKPEEK_DOCX_FIXTURE));
   marginCases.push(['real', 32, 1]);
 }
+if (process.env.QUICKPEEK_XLSX_FIXTURE) marginFixtures.set('/fixture-sheet.real.xlsx', readFileSync(process.env.QUICKPEEK_XLSX_FIXTURE));
+const realSheetNames = process.env.QUICKPEEK_XLSX_FIXTURE
+  ? XLSX.read(marginFixtures.get('/fixture-sheet.real.xlsx'), { bookSheets: true }).SheetNames : [];
+const workbookTypes = ['xlsx', 'xls', 'csv', 'prefixed.xlsx', ...(process.env.QUICKPEEK_XLSX_FIXTURE ? ['real.xlsx'] : [])];
 const root = resolve('dist');
 const server = createServer((req, res) => {
   if (marginFixtures.has(req.url)) { res.end(marginFixtures.get(req.url)); return; }
@@ -59,11 +76,16 @@ try {
   let sequence = 0; const pending = new Map();
   socket.addEventListener('message', event => { const m = JSON.parse(event.data); if (m.id) { pending.get(m.id)?.(m); pending.delete(m.id); } });
   const send = (method, params = {}) => new Promise(resolve => { const id = ++sequence; pending.set(id, resolve); socket.send(JSON.stringify({ id, method, params })); });
+  await send('Runtime.enable');
+  socket.addEventListener('message', event => {
+    const m = JSON.parse(event.data);
+    if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') console.error(m.params.args.map(arg => arg.value ?? arg.description).join(' '));
+  });
   await send('Page.enable');
   const loaded = new Promise(resolve => socket.addEventListener('message', function ready(event) { if (JSON.parse(event.data).method === 'Page.loadEventFired') { socket.removeEventListener('message', ready); resolve(); } }));
   await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   await loaded;
-  const result = await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, timeout: 15000, expression: `(async () => {
+  const result = await send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, timeout: 45000, expression: `(async () => {
     const assert = (value, message) => { if (!value) throw new Error(message); };
     const workspace = document.querySelector('#workspace');
     const urls = new Set();let created = 0;
@@ -107,20 +129,21 @@ try {
         assert(page.getBoundingClientRect().width < 900, 'missing page width stretched the paragraph');
       }
     }
-    for (const type of ['xlsx', 'xls', 'csv']) {
+    for (const type of ${JSON.stringify(workbookTypes)}) {
       const name = 'sheet.'+type;
       const bytes = await fetch('/fixture-'+name).then(r=>r.arrayBuffer());
       const transfer = new DataTransfer();transfer.items.add(new File([bytes], name));
       const input=document.querySelector('#fileInput');input.files=transfer.files;input.dispatchEvent(new Event('change'));
       const end=performance.now()+10000;
       while(!document.title.startsWith(name)||!document.querySelector('.excel-viewer')) {if(performance.now()>end)throw Error('Workbook did not render '+name);await new Promise(requestAnimationFrame);}
+      if (type === 'real.xlsx') assert(${JSON.stringify(realSheetNames)}.every(name=>[...document.querySelectorAll('.x-spreadsheet-bottombar li')].some(e=>e.textContent===name)), 'workbook lost its sheet tabs: '+[...document.querySelectorAll('.x-spreadsheet-bottombar li')].map(e=>e.textContent).join('|'));
     }
     const transfer = new DataTransfer();transfer.items.add(new File(['after images'], 'final.txt'));
     const input = document.querySelector('#fileInput');input.files=transfer.files;input.dispatchEvent(new Event('change'));
     const end = performance.now()+5000;
     while (!document.title.startsWith('final.txt')) { if(performance.now()>end)throw Error('final preview timeout');await new Promise(requestAnimationFrame); }
     assert(created >= 3 && urls.size === 0, 'DOCX images leaked after switching: '+urls.size);
-    return { xlsxXlsCsvRendered: true, docxBlobUrlsReleased: true, retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true,
+    return { xlsxXlsCsvRendered: true, prefixedSpreadsheetAndAbsoluteTableTargets: true, realWorkbook: ${Boolean(process.env.QUICKPEEK_XLSX_FIXTURE)}, docxBlobUrlsReleased: true, retiredPageRemoved: true, idleSurfaceDark: true, textAndMarkdownSwitch: true,
       docxZeroAndMissingMargins: true, docxOriginalMarginsPreserved: true };
   })()` });
   assert.ok(!result.error && !result.result.exceptionDetails, JSON.stringify(result));

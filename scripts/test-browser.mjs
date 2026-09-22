@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 const suites = [
   "epub-browser-smoke.mjs",
   "format-browser-smoke.mjs",
-  "pdf-browser-smoke.mjs",
+  "pdfjs-browser-smoke.mjs",
   "preview-shell-smoke.mjs",
   "preview-lifecycle-browser-smoke.mjs",
 ];

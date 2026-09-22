@@ -2,7 +2,7 @@
 
 QuickPeek is a lightweight, read-only file viewer for Windows. Select a file in File Explorer and press **Space** to view it without opening its usual application. Files stay on your computer; no account or upload is needed.
 
-The Windows x64 installer is about **2.2 MB**. QuickPeek uses the shared Microsoft Edge WebView2 runtime rather than including a separate browser. It is designed to keep memory use low: viewers load when needed, large files have preview limits, and closing a preview releases the current file and puts the viewer to sleep. Actual memory use varies with the file and installed preview components.
+QuickPeek keeps its download small by using the shared Microsoft Edge WebView2 runtime rather than including a separate browser. It is designed to keep memory use low: viewers load when needed, large files have preview limits, and closing a preview releases the current file and puts the viewer to sleep. Actual memory use varies with the file and installed preview components.
 
 ## Install
 
@@ -30,7 +30,7 @@ Space does not open a preview while you are typing in File Explorer's search box
 
 | Type | Extensions | What to expect |
 | --- | --- | --- |
-| PDF | `.pdf` | Page preview with scrolling. |
+| PDF | `.pdf` | Scrolling, page thumbnails, and zoom that keeps vector text and graphics sharp. |
 | Word documents and templates | `.docx`, `.docm`, `.dotx`, `.dotm` | Text, tables, images, and page layout. Macros are not run. |
 | Rich Text Format | `.rtf` | Formatted text with reading margins; Word is not required. |
 | Older Word documents | `.doc` | Requires a compatible Windows preview handler, usually installed with an office application. |
@@ -67,6 +67,8 @@ QuickPeek shows a collapsible list of folders and files, with sizes and dates wh
 QuickPeek displays the following as text, with syntax highlighting for recognized languages in smaller files. HTML and script files are shown as source, not executed.
 
 Text, Markdown, and source-code previews follow the system light or dark theme. Source-code previews include line numbers.
+
+In PDF previews, click a thumbnail to jump to a page. Use the toolbar or **Ctrl + mouse wheel** to zoom, and **Fit width** to return to the reading width. The thumbnail column can be hidden. Scanned pages retain the resolution of the original scan.
 
 ```text
 adoc, ahk, asm, asciidoc, ass, astro, awk, bash, bat, bib, c, cc, cfg,
